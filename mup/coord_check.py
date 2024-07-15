@@ -208,7 +208,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                 output_name='loss', lossfn='xent', filter_module_by_name=None,
                 fix_data=True, cuda=True, nseeds=1, 
                 output_fdict=None, input_fdict=None, param_fdict=None,
-                show_progress=True, one_hot_target=False):
+                show_progress=True, one_hot_target=False, specific_seed=None):
     '''Inner method for `get_coord_data`.
 
     Train the models in `models` with optimizer given by `optcls` and data from
@@ -281,6 +281,15 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
     
     '''
     df = []
+
+    if specific_seed is not None:
+        seeds_iter = [specific_seed]
+        if nseeds != 1:
+            print('WARNING: specific_seed set but nseeds not set to 1.')
+        nseeds = 1
+    else:
+        seeds_iter = range(nseeds)
+
     if fix_data:
         batch = next(iter(dataloader))
         dataloader = [batch] * nsteps
@@ -288,9 +297,13 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
         from tqdm import tqdm
         pbar = tqdm(total=nseeds * len(models))
 
-    for i in range(nseeds):
+    for i in seeds_iter:
+        # print(f"seed is set to {i}")
         torch.manual_seed(i)
         for width, model in models.items():
+            # if width == 1700:
+            #     rng_state = torch.get_rng_state()
+            #     torch.save(rng_state, '/home/berlin/mup/coord_checks/rng_state_1700.pt')
             model = model()
             model = model.train()
             if cuda:

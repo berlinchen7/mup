@@ -24,7 +24,7 @@ from mup.init import (kaiming_normal_, kaiming_uniform_, normal_,
                          xavier_uniform_)
 from torch.nn.modules.conv import _ConvNd
 from einops import rearrange, repeat
-from s4_simple import SSM, set_base_shapes_custom
+from ssm import SSM, set_base_shapes_custom
 
 
 samplers = {
@@ -123,16 +123,24 @@ def generate_depthwise1dCNN(width, bias=True, mup=True, readout_zero_init=True, 
     #             module.bias.data.zero_()
     return model
 
-def generate_SSM_models(widths, num_input_channels=3, d_state=1, mup=True, readout_zero_init=True,):
+def generate_SSM_models(widths, 
+                        num_input_channels=3, 
+                        d_state=1, 
+                        mup=True, 
+                        readout_zero_init=False,
+                        **kernel_args,
+                        ):
     """d_model==width"""
     base_width = 3
 
     def gen(w):
         def f():
             base_model = SSM(num_input_channels=num_input_channels,
-                        d_model=base_width, d_state=d_state, mup=mup)
+                        d_model=base_width, d_state=d_state, 
+                        mup=mup, readout_zero_init=readout_zero_init, **kernel_args)
             model = SSM(num_input_channels=num_input_channels,
-                        d_model=w, d_state=d_state, mup=mup)
+                        d_model=w, d_state=d_state, 
+                        mup=mup, readout_zero_init=readout_zero_init, **kernel_args)
             set_base_shapes_custom(model, base_model)
             if readout_zero_init:
                 readout = list(model.modules())[-1]
@@ -158,34 +166,67 @@ def get_lazy_models(arch, widths, mup=True, init='kaiming_fan_in_normal', readou
     return {w: gen(w) for w in widths}
 
 
-from mup.coord_check import get_coord_data, plot_coord_data
-# construct a dictionary of lazy μP models with differing widths
-# def lazy_model(width):
-#     # `set_base_shapes` returns the model
-#     return lambda: set_base_shapes(MyMuModel(width), 'my/base/shape/path.bsh')
-    # Note: any custom initialization with `mup.init` would need to
-    # be done inside the lambda as well
+if __name__ == '__main__':
+
+    from mup.coord_check import get_coord_data, plot_coord_data
+    # construct a dictionary of lazy μP models with differing widths
+    # def lazy_model(width):
+    #     # `set_base_shapes` returns the model
+    #     return lambda: set_base_shapes(MyMuModel(width), 'my/base/shape/path.bsh')
+        # Note: any custom initialization with `mup.init` would need to
+        # be done inside the lambda as well
 
 
-# models = get_lazy_models('depthwise_1dcnn', [3, 6, 12, 24, 48, 96, 192, 384], mup=True, )
-# models = generate_SSM_models([3, 384, 500, 600, 1000, 3000], mup=True, ) #NOTE
-models = generate_SSM_models([100, 300, 500, 700, 900, 1100, 1300, 1500, 1700, 1900, 2100, 2300, 2500, 3000, 3500, 4000, 4500, 4600], mup=True)#, 1000, 2000, 3000, 4000, 5000], mup=True, )
+    # models = get_lazy_models('depthwise_1dcnn', [3, 6, 12, 24, 48, 96, 192, 384], mup=True, )
+    # models = generate_SSM_models([3, 384, 500, 600, 1000, 3000], mup=True, ) #NOTE
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], mup=True)# Used to generate μp_ssm_sgd_lr0.1_nseeds40_bn0_coord_4Jul2024 and μp_ssm_sgd_lr1_nseeds40_bn0_coord_7Jul2024
+ 
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], d_state=10, mup=True)
+ 
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700], mup=True)
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              readout_zero_init=False) # Used for run6 and run7
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
+    #                              mup=True, learn_A=False, A_scale=1.0,
+    #                              readout_zero_init=False) # Used for run8
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=True,
+    #                              readout_zero_init=False) # Used for runa1
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
+    #                              mup=True, learn_A=False, A_scale=0.0,
+    #                              selective=True,
+    #                              readout_zero_init=False) # Used for runa4 and runa7
+    
+    models = generate_SSM_models([100, 900, 1700, 2500, 4100], 
+                                 mup=True, learn_A=False, A_scale=0.0,
+                                 selective=True,
+                                 readout_zero_init=False) # Simplified version
 
-# make a dataloader with small batch size/seq len
-#   just for testing
-dataloader = get_train_loader(batch_size=1, num_workers=0, shuffle=False, train=True, download=False)
+    # make a dataloader with small batch size/seq len
+    #   just for testing
+    dataloader = get_train_loader(batch_size=1, num_workers=0, shuffle=False, train=True, download=True)
+    # dataloader = get_train_loader(batch_size=10, num_workers=0, shuffle=False, train=True, download=True)
 
-# record data from the model activations over a few steps of training
-# this returns a pandas dataframe
-# df = get_coord_data(models, dataloader, nseeds=2, nsteps=2, lr=0.1, optimizer='sgd') NOTE
-df = get_coord_data(models, dataloader, nseeds=40, nsteps=3, lr=0.1, optimizer='sgd', cuda=False)
+    # record data from the model activations over a few steps of training
+    # this returns a pandas dataframe
+    # df = get_coord_data(models, dataloader, nseeds=2, nsteps=2, lr=0.1, optimizer='sgd') NOTE
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=3, lr=0.1, optimizer='sgd', cuda=False) # Used to generate μp_ssm_sgd_lr0.1_nseeds40_bn0_coord_4Jul2024
 
-df.to_pickle("/home/berlin/mup/coord_checks/df_pickle.pkl")  
-# This saves the coord check plots to filename.
-filename = '/home/berlin/mup/coord_checks/ssm_mu1.png'
-import numpy as np
-df.replace([np.inf, -np.inf], np.nan, inplace=True)
-plot_coord_data(df.dropna(), save_to=filename)
-# If you are in jupyter notebook, you can also do
-#   `plt.show()`
-# to show the plot
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=1.0, optimizer='sgd', cuda=False)#, specific_seed=22)  # Used to generate μp_ssm_sgd_lr1_nseeds40_bn0_coord_7Jul2024
+
+    df = get_coord_data(models, dataloader, nseeds=5, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Simplified version
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Used for runa7
+
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=0.1, optimizer='sgd', cuda=False)
+
+    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runtest2.pkl")  
+    # This saves the coord check plots to filename.
+    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runtest2.png'
+    import numpy as np
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    plot_coord_data(df.dropna(), save_to=filename)
+    # If you are in jupyter notebook, you can also do
+    #   `plt.show()`
+    # to show the plot
