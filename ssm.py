@@ -9,6 +9,7 @@ d_state is hidden dim which is N.
 
 import math
 from copy import copy
+from tqdm import tqdm
 from collections import defaultdict
 import numpy as np
 import torch
@@ -54,8 +55,10 @@ class NonSelectiveSSMKernel(nn.Module):
             self.A = nn.Parameter(torch.diag(torch.rand(N)*A_scale))
         else:
             self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
-        self.B = nn.Parameter(torch.rand(N))
-        self.C = nn.Parameter(torch.rand(N))
+        # self.B = nn.Parameter(torch.rand(N)*1) # TODO
+        # self.C = nn.Parameter(torch.rand(N)*1) # TODO
+        self.B = nn.Parameter(torch.ones(N)*1)
+        self.C = nn.Parameter(torch.ones(N)*1) 
 
     def _compute_A_mat(self, A_n, L):
         A_mat = torch.zeros(L, L)
@@ -75,6 +78,7 @@ class NonSelectiveSSMKernel(nn.Module):
         Otherwise, compute y using the recursive defn of SSM. In this case u.size() = (B, H, L)
         """
         if u is not None:
+            # return self.B*self.C*u
             batch_size = u.size(0)
             h = torch.zeros(batch_size, self.N, self.d_model)
             y = torch.zeros(u.size()) # B, H, L
@@ -129,8 +133,11 @@ class SelectiveSSMKernel(nn.Module):
             self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
         # For selective SSM, B is now a dual of hidden vector:
         scale = 1 / (self.d_model*self.N)**.5
-        self.B = nn.Parameter(torch.randn(d_model, N)*scale)#/ d_model)
-        self.C = nn.Parameter(torch.randn(d_model, N)*scale)#/ d_model)
+        self.B = nn.Parameter(torch.randn(d_model, N) * scale)
+        self.C = nn.Parameter(torch.randn(d_model, N) * scale)
+        # self.B = nn.Parameter(torch.ones(d_model, N)/ d_model)
+        # self.C = nn.Parameter(torch.ones(d_model, N)/ d_model)
+        
         # self.B = nn.Linear(d_model, N, bias=False)
         # self.C = nn.Linear(d_model, N, bias=False)
 
@@ -292,7 +299,7 @@ def process_param_groups(params, **kwargs):
     return param_groups
 
 
-def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, **kwargs):
+def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_multiply=1, **kwargs):
     '''SGD with μP scaling.
 
     Note for this to work properly, your model needs to have its base shapes set
@@ -327,13 +334,14 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, **kwargs):
             assert hasattr(p, 'infshape'), (
                 f'A parameter with shape {p.shape} does not have `infshape` attribute. '
                 'Did you forget to call `mup.set_base_shapes` on the model?')
+            if model_names is not None and ('kernel' in model_names[i] or 'B' in model_names[i] or 'C' in model_names[i]):
+                ssm_like_p[p.infshape.width_mult()]['params'].append(p)
+                continue
             if p.infshape.ninf() == 1:
-                if model_names is not None and 'kernel' in model_names[i]:
-                    ssm_like_p[p.infshape.width_mult()]['params'].append(p)
+                
                 # elif 'down_project' in model_names[i]:
                 #     ssm_like_p[p.infshape.width_mult()]['params'].append(p)
-                else:
-                    vector_like_p[p.infshape.width_mult()]['params'].append(p)
+                vector_like_p[p.infshape.width_mult()]['params'].append(p)
             elif p.infshape.ninf() == 2:
                 matrix_like_p[p.infshape.fanin_fanout_mult_ratio()]['params'].append(p)
             elif p.infshape.ninf() > 2:
@@ -353,8 +361,7 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, **kwargs):
         # Do multiplication for ssm_like_p for now:
         for width_mult, group in ssm_like_p.items():
             # print(group, width_mult)
-            # print(width_mult)
-            group['lr'] = group['lr'] / (width_mult**2) # (width_mult)
+            group['lr'] = group['lr'] * ssm_force_multiply#/ (width_mult**.5) # (width_mult**2) # (width_mult)
         new_param_groups.extend(list(matrix_like_p.values()) + \
                                 list(vector_like_p.values()) + \
                                 list(ssm_like_p.values()) + \
@@ -529,88 +536,136 @@ def simple_train(model, base_model, num_steps):
     # print(model.kernel.B.grad.size())
     # print(torch.sum(torch.abs(model.down_project.weight.grad)))
 
-    return torch.sum(torch.abs(out))
+    return torch.sum(torch.abs(model.kernel.B.grad))
 
     # for name, p in model.named_parameters():
     #     print(f"name is {name}")
 
-
+"""
 if __name__ == "__main__":
     import numpy as np
+    import statistics
 
     d_state = 1
-    A_scale = 0.1
+    A_scale = 0.0
     use_kernel = False
-    selective = True
-    seed = 1
-    num_steps = 3
+    selective = False
+    seeds = 10
+    num_steps = 2
 
-    d_models = [512, 1024, 2048, 4056]# [1000, 2000, 3000, 4000, 5000]#[10, 100, 1000, 2000, 3000, 4000, 5000]
+    d_models = range(100, 1000, 100)# [1000, 2000, 3000, 4000, 5000]#[10, 100, 1000, 2000, 3000, 4000, 5000]
 
     base_sd = SSM(num_input_channels=3, d_model=3, d_state=d_state, 
                   mup=True, use_kernel=use_kernel, A_scale=A_scale, 
                   selective=selective, readout_zero_init=False, learn_A=False)
     for d_model in d_models:
-        torch.manual_seed(seed)
-        sd = SSM(num_input_channels=3, d_model=d_model, d_state=d_state, 
-                 mup=True, use_kernel=use_kernel, A_scale=A_scale, 
-                 selective=selective, readout_zero_init=False, learn_A=False)
-        # if d_model != 2000:
-        #     continue
-        quantity = simple_train(sd, base_sd, num_steps=num_steps)
-        print(f"{d_model} \t {quantity}")
-        
-
+        quantity = []
+        for seed in range(seeds):
+            torch.manual_seed(seed)
+            sd = SSM(num_input_channels=3, d_model=d_model, d_state=d_state, 
+                    mup=True, use_kernel=use_kernel, A_scale=A_scale, 
+                    selective=selective, readout_zero_init=False, learn_A=False)
+            # if d_model != 2000:
+            #     continue
+            quantity.append(simple_train(sd, base_sd, num_steps=num_steps).item())
+        # print(quantity)
+        print(f"{d_model} \t {statistics.mean(quantity)}")
         
 """
+        
+
 if __name__ == "__main__":
 
     get_l1_norm = lambda x: torch.abs(x).mean(dtype=torch.float32)
 
-    seeds = 1
-    B, L = 1, 4
-    d_models = [10, 100, 1000, 2000, 3000]
-    d_state = 2
-    num_steps = 20
+    seeds = 1#100
+    B, L = 1, 1
+    d_models = [100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900,]#[100, 1000, 5000, 10000, 15000, 20000, 25000]
+    d_models = d_models + list(range(5700, 35000, 800))
+
+    # d_models = [10]
+    # d_models = [100, 300, 500, 700, 900]# 1000, 5000, 10000, 15000]
+    # d_models = [5, 1000, 5000, 10000, 15000]
+
+
+    d_state = 1
+    num_steps = 40
 
 
     steps_inp = []
     quant_inp = []
     dmodel_inp = []
 
-    train_loader = get_train_loader(1)
+    # train_loader = get_train_loader(1)
 
-    batch = next(iter(train_loader))
-    (u, target) = batch
+    # batch = next(iter(train_loader))
+    # (u, target) = batch
 
 
-    for d_model in d_models:
-        for seed in range(seeds):
-            torch.manual_seed(seed)
-            model = NonSelectiveSSMKernel(d_model=d_model, 
+    base_model = SelectiveSSMKernel(d_model=3, 
                                         N=d_state,
                                         learn_A=False,
-                                        A_scale=.1,
+                                        A_scale=0.0,
                                         )
-            
-            # input = torch.rand(B, d_model, L)
-            input = u
-            target = torch.rand(B, d_model, L)
 
-            optimizer = SGD(model.parameters(), lr=1.0, momentum=0) #SGD(model.parameters(), lr=0.001, momentum=0)
+    for seed in tqdm(range(seeds)):
+        torch.manual_seed(seed)
+        for d_model in d_models:
+            # print(d_model)
+        
+            model = SelectiveSSMKernel(d_model=d_model, 
+                                        N=d_state,
+                                        learn_A=False,
+                                        A_scale=0.0,
+                                        )
+            set_base_shapes_custom(model, base_model, do_assert=False)
+            # input = torch.rand(B, d_model, L)
+            input = torch.ones(B, d_model, L)*1.0
+            target = torch.ones(B, d_model, L)*5.01
+
+            model_names = []
+            for n, _ in model.named_parameters():
+                model_names.append(n)
+            # print(model_names)
+
+            optimizer =  MuSGD(model.parameters(), 
+                            model_names=model_names,
+                            lr=0.1, 
+                            momentum=0,
+                            ssm_force_multiply=1/d_model
+                        )
+
+            # optimizer = MuSGD(model.parameters(), lr=1.0, momentum=0) #SGD(model.parameters(), lr=0.001, momentum=0)
 
             for i in range(num_steps):
                 optimizer.zero_grad()
-                out = model(L, input)
 
-                loss = nn.MSELoss()
-                output = loss(out, target)
+                # K = model(L=L)
+                # K.retain_grad()
+                # u = rearrange(input, 'b l h -> b (l h)')
+                # u = torch.einsum('ij,bj->bi', K, u)
+                # out = rearrange(u, 'b (l h) -> b h l', l=L)
+
+
+                out = model(L, input)
+                # out.retain_grad()
+
+                # loss = nn.MSELoss(reduction='mean')
+                # output = loss(out, target) #torch.sum(out)/d_model#
+                output = torch.sum((out - target)**2) / d_model
                 output.backward()
                 optimizer.step()
 
+                if i == 39:
+                    # print(f"d_model is {d_model} \t\t B.grad is {model.B.grad.item()} \t\t output is {get_l1_norm(out).item()} ")
+                    print(f"d_model is {d_model} \t\t |B.grad|*/ d_model**.5 is {torch.linalg.matrix_norm(model.B.grad.T, ord=2) / d_model**.5} \t\t output is {get_l1_norm(out).item()} ")
+                    # print(f"d_model is {d_model} \t\t \t\t output is {get_l1_norm(out).item()} ")
+                #     print(f"output is {output}; get_l1_norm(out) is {get_l1_norm(out)}")
+                # print(K)
+                # print(K.grad)
 
                 steps_inp.append(i)
-                quant_inp.append((get_l1_norm(model.B.grad)).item())
+                quant_inp.append((get_l1_norm(out)).item())
                 dmodel_inp.append(d_model)
                 # print(f"B.grad is {model.B.grad}")
                 # for name, p in model.named_parameters():
@@ -620,6 +675,6 @@ if __name__ == "__main__":
     import seaborn as sns
     df = pd.DataFrame({"steps": steps_inp, "quantity": quant_inp, "d_model": dmodel_inp})
     fig = sns.lineplot(df, x="d_model", y="quantity", hue="steps").get_figure()
-    fig.savefig("out.png") 
+    fig.savefig("out3.png") 
 
-"""
+

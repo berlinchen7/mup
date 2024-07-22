@@ -467,8 +467,23 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                 if filter_trainable_by_name(name):
                     params.append(p)
         return params
+    from ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, MuSGD as SGDSSM
     if optimizer == 'sgd':
-        optcls = lambda model: SGD(get_trainable(model), lr=lr)
+        def optcls(model):
+            if isinstance(model, SSM):
+                model_names = []
+                for n, _ in model.named_parameters():
+                    model_names.append(n)
+                if isinstance(model.kernel, SelectiveSSMKernel):
+                    # print("DEBUG 1")
+                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names)
+                elif isinstance(model.kernel, NonSelectiveSSMKernel):
+                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names)
+                else:
+                    raise ValueError
+            else:
+                return SGD(get_trainable(model), lr=lr)
+
     elif optimizer == 'adam':
         optcls = lambda model: Adam(get_trainable(model), lr=lr)
     elif optimizer == 'adamw':

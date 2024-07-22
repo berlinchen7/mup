@@ -186,7 +186,7 @@ if __name__ == '__main__':
     # models = generate_SSM_models([100, 500, 900, 1300, 1700], mup=True)
     # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
     #                              mup=True, learn_A=False, A_scale=0.1,
-    #                              readout_zero_init=False) # Used for run6 and run7
+    #                              readout_zero_init=False) # Used for run6 and run7 and run9
     # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
     #                              mup=True, learn_A=False, A_scale=1.0,
     #                              readout_zero_init=False) # Used for run8
@@ -198,11 +198,19 @@ if __name__ == '__main__':
     #                              mup=True, learn_A=False, A_scale=0.0,
     #                              selective=True,
     #                              readout_zero_init=False) # Used for runa4 and runa7
-    
-    models = generate_SSM_models([100, 900, 1700, 2500, 4100], 
-                                 mup=True, learn_A=False, A_scale=0.0,
+    models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
+                                 mup=True, learn_A=False, A_scale=0.1,
                                  selective=True,
-                                 readout_zero_init=False) # Simplified version
+                                 readout_zero_init=False) # Used for runa10 and runa11
+    # models = generate_SSM_models([100, 500, 900], #, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
+    #                              mup=True, learn_A=False, A_scale=0.0,
+    #                              selective=True,
+    #                              readout_zero_init=False) # Used for runtest5
+    
+    # models = generate_SSM_models([100, 900, 1700, 2500, 4100], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=False,
+    #                              readout_zero_init=False) # Simplified version (for non-selective currently)
 
     # make a dataloader with small batch size/seq len
     #   just for testing
@@ -216,14 +224,19 @@ if __name__ == '__main__':
 
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=1.0, optimizer='sgd', cuda=False)#, specific_seed=22)  # Used to generate μp_ssm_sgd_lr1_nseeds40_bn0_coord_7Jul2024
 
-    df = get_coord_data(models, dataloader, nseeds=5, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Simplified version
-    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Used for runa7
+    # df = get_coord_data(models, dataloader, nseeds=5, nsteps=10, lr=1.0, optimizer='sgd', cuda=False) # Simplified version (for non-selective currently)
 
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=1.0, optimizer='sgd', cuda=False) # Used for run 9 and a10
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=3, lr=1.0, optimizer='sgd', cuda=False) # Used for test5
+    # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=1.0, optimizer='sgd', cuda=False) # Used for a11
+    df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=0.1, optimizer='sgd', cuda=False) # Used for a12
+
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Used for runa7
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=0.1, optimizer='sgd', cuda=False)
 
-    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runtest2.pkl")  
+    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runa12.pkl")  
     # This saves the coord check plots to filename.
-    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runtest2.png'
+    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runa12.png'
     import numpy as np
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     plot_coord_data(df.dropna(), save_to=filename)
