@@ -372,12 +372,13 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
             # print(group, width_mult)
             group['lr'] = group['lr'] * ssm_force_multiply#/ (width_mult**.5) # (width_mult**2) # (width_mult)
         for width_mult, group in upproj_like_p.items():
-            # print("DEBUG A")
+            # print(f"DEBUG A: width is {width_mult}")
             assert L is not None
-            group['lr'] = group['lr'] / L
+            group['lr'] = width_mult * group['lr'] / L 
         new_param_groups.extend(list(matrix_like_p.values()) + \
                                 list(vector_like_p.values()) + \
                                 list(ssm_like_p.values()) + \
+                                list(upproj_like_p.values()) + \
                                 [fixed_p])
     return impl(new_param_groups, **kwargs)
 
@@ -585,7 +586,7 @@ if __name__ == "__main__":
             # if d_model != 2000:
             #     continue
             quantity.append(simple_train(sd, base_sd, num_steps=num_steps).item())
-            # print(quantity)
+            print(quantity)
         print(f"{d_model} \t {quantity}")
    
         

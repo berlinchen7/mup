@@ -476,9 +476,9 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                     model_names.append(n)
                 if isinstance(model.kernel, SelectiveSSMKernel):
                     # print("DEBUG 1")
-                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names)
+                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024,)
                 elif isinstance(model.kernel, NonSelectiveSSMKernel):
-                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names)
+                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024,)
                 else:
                     raise ValueError
             else:
