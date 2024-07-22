@@ -55,10 +55,10 @@ class NonSelectiveSSMKernel(nn.Module):
             self.A = nn.Parameter(torch.diag(torch.rand(N)*A_scale))
         else:
             self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
-        # self.B = nn.Parameter(torch.rand(N)*1) # TODO
-        # self.C = nn.Parameter(torch.rand(N)*1) # TODO
-        self.B = nn.Parameter(torch.ones(N)*1)
-        self.C = nn.Parameter(torch.ones(N)*1) 
+        self.B = nn.Parameter(torch.rand(N)*1) 
+        self.C = nn.Parameter(torch.rand(N)*1)
+        # self.B = nn.Parameter(torch.ones(N)*1)
+        # self.C = nn.Parameter(torch.ones(N)*1) 
 
     def _compute_A_mat(self, A_n, L):
         A_mat = torch.zeros(L, L)
@@ -135,6 +135,10 @@ class SelectiveSSMKernel(nn.Module):
         scale = 1 / (self.d_model*self.N)**.5
         self.B = nn.Parameter(torch.randn(d_model, N) * scale)
         self.C = nn.Parameter(torch.randn(d_model, N) * scale)
+
+        # self.register_buffer('B', torch.randn(d_model, N) * scale)
+        # self.register_buffer('C', torch.randn(d_model, N) * scale)
+
         # self.B = nn.Parameter(torch.ones(d_model, N)/ d_model)
         # self.C = nn.Parameter(torch.ones(d_model, N)/ d_model)
         
@@ -261,12 +265,13 @@ class SSM(nn.Module):
 
         if not self.transposed: y = y.transpose(-1, -2)
 
+        # y = u
         y = torch.sum(y, dim=2) / L # Average along L dimesion; note
                                     # that if we don't divide by L,
                                     # we may induce a large activation,
                                     # which may destabilize training by
                                     # having explosive gradients.
-
+        # y = torch.clamp(y, min=(-2**4), max=(2**4)) # TODO
         y = self.down_project(y)
         return y
 
@@ -299,7 +304,7 @@ def process_param_groups(params, **kwargs):
     return param_groups
 
 
-def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_multiply=1, **kwargs):
+def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_multiply=1, L=None, **kwargs):
     '''SGD with μP scaling.
 
     Note for this to work properly, your model needs to have its base shapes set
@@ -328,6 +333,7 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
         matrix_like_p = defaultdict(new_group) # key is fan_in/out ratio
 
         ssm_like_p = defaultdict(new_group) # for selective ssm
+        upproj_like_p = defaultdict(new_group) # for debugging ssm
 
         fixed_p = new_group()
         for i, p in enumerate(param_group['params']):
@@ -336,6 +342,9 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
                 'Did you forget to call `mup.set_base_shapes` on the model?')
             if model_names is not None and ('kernel' in model_names[i] or 'B' in model_names[i] or 'C' in model_names[i]):
                 ssm_like_p[p.infshape.width_mult()]['params'].append(p)
+                continue
+            if model_names is not None and ('up_project' in model_names[i]):
+                upproj_like_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if p.infshape.ninf() == 1:
                 
@@ -362,6 +371,10 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
         for width_mult, group in ssm_like_p.items():
             # print(group, width_mult)
             group['lr'] = group['lr'] * ssm_force_multiply#/ (width_mult**.5) # (width_mult**2) # (width_mult)
+        for width_mult, group in upproj_like_p.items():
+            # print("DEBUG A")
+            assert L is not None
+            group['lr'] = group['lr'] / L
         new_param_groups.extend(list(matrix_like_p.values()) + \
                                 list(vector_like_p.values()) + \
                                 list(ssm_like_p.values()) + \
@@ -471,7 +484,7 @@ def set_base_shapes_custom(model, base, rescale_params=True, delta=None, savefil
 
 
 def simple_train(model, base_model, num_steps):
-    train_loader = get_train_loader(1)
+    train_loader = get_train_loader(1,) #, download=True)
 
     batch = next(iter(train_loader))
     (u, target) = batch
@@ -499,14 +512,19 @@ def simple_train(model, base_model, num_steps):
     for n, _ in model.named_parameters():
         model_names.append(n)
 
+    d_model = model.h
     optimizer =  MuSGD(model.parameters(), 
                       model_names=model_names,
                       lr=1.0, 
                       momentum=0,
+                      L=1024,
+                      ssm_force_multiply=1/d_model,
                       )# SGD(model.parameters(), lr=1.0, momentum=0)
 
     for i in range(num_steps):
         optimizer.zero_grad()
+        # if i == 6:
+        #     print('hello')
         out = model(u)
 
         loss = F.cross_entropy(out, target)
@@ -536,24 +554,23 @@ def simple_train(model, base_model, num_steps):
     # print(model.kernel.B.grad.size())
     # print(torch.sum(torch.abs(model.down_project.weight.grad)))
 
-    return torch.sum(torch.abs(model.kernel.B.grad))
+    return torch.sum(torch.abs(out)) 
 
     # for name, p in model.named_parameters():
     #     print(f"name is {name}")
 
-"""
 if __name__ == "__main__":
     import numpy as np
     import statistics
 
     d_state = 1
-    A_scale = 0.0
+    A_scale = 0.1
     use_kernel = False
-    selective = False
-    seeds = 10
-    num_steps = 2
+    selective = True
+    seeds = 5
+    num_steps = 7
 
-    d_models = range(100, 1000, 100)# [1000, 2000, 3000, 4000, 5000]#[10, 100, 1000, 2000, 3000, 4000, 5000]
+    d_models = [4100] #range(100, 1000, 100)# [1000, 2000, 3000, 4000, 5000]#[10, 100, 1000, 2000, 3000, 4000, 5000]
 
     base_sd = SSM(num_input_channels=3, d_model=3, d_state=d_state, 
                   mup=True, use_kernel=use_kernel, A_scale=A_scale, 
@@ -568,12 +585,11 @@ if __name__ == "__main__":
             # if d_model != 2000:
             #     continue
             quantity.append(simple_train(sd, base_sd, num_steps=num_steps).item())
-        # print(quantity)
-        print(f"{d_model} \t {statistics.mean(quantity)}")
+            # print(quantity)
+        print(f"{d_model} \t {quantity}")
+   
         
 """
-        
-
 if __name__ == "__main__":
 
     get_l1_norm = lambda x: torch.abs(x).mean(dtype=torch.float32)
@@ -677,4 +693,4 @@ if __name__ == "__main__":
     fig = sns.lineplot(df, x="d_model", y="quantity", hue="steps").get_figure()
     fig.savefig("out3.png") 
 
-
+"""
