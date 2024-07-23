@@ -132,15 +132,22 @@ class SelectiveSSMKernel(nn.Module):
         else:
             self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
         # For selective SSM, B is now a dual of hidden vector:
-        scale = 1 / (self.d_model*self.N)**.5
-        self.B = nn.Parameter(torch.randn(d_model, N) * scale)
-        self.C = nn.Parameter(torch.randn(d_model, N) * scale)
+        # scale = 1 / (self.d_model*self.N)**.5 # TODO
+        # self.B = nn.Parameter(torch.randn(d_model, N) * scale)
+        # self.C = nn.Parameter(torch.randn(d_model, N) * scale)
 
         # self.register_buffer('B', torch.randn(d_model, N) * scale)
         # self.register_buffer('C', torch.randn(d_model, N) * scale)
 
-        # self.B = nn.Parameter(torch.ones(d_model, N)/ d_model)
-        # self.C = nn.Parameter(torch.ones(d_model, N)/ d_model)
+        # self.B = nn.Parameter(torch.rand(d_model, N)/ (d_model**.5)) # TODO
+        # self.C = nn.Parameter(torch.rand(d_model, N)/ (d_model**.5)) # TODO
+
+        import scipy
+        scale = (N/d_model)**.5
+        B_init, _ = scipy.linalg.qr(torch.rand(d_model, N))
+        C_init, _ = scipy.linalg.qr(torch.rand(d_model, N))
+        self.B = nn.Parameter(torch.tensor(B_init*scale))
+        self.C = nn.Parameter(torch.tensor(C_init*scale))
         
         # self.B = nn.Linear(d_model, N, bias=False)
         # self.C = nn.Linear(d_model, N, bias=False)
@@ -370,7 +377,8 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
         # Do multiplication for ssm_like_p for now:
         for width_mult, group in ssm_like_p.items():
             # print(group, width_mult)
-            group['lr'] = group['lr'] * ssm_force_multiply#/ (width_mult**.5) # (width_mult**2) # (width_mult)
+            assert L is not None
+            group['lr'] = group['lr'] * ssm_force_multiply / L#/ (width_mult**.5) # (width_mult**2) # (width_mult) TODO
         for width_mult, group in upproj_like_p.items():
             # print(f"DEBUG A: width is {width_mult}")
             assert L is not None

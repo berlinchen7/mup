@@ -201,7 +201,7 @@ if __name__ == '__main__':
     models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
                                  mup=True, learn_A=False, A_scale=0.1,
                                  selective=True,
-                                 readout_zero_init=False) # Used for runa10 and runa11 a17
+                                 readout_zero_init=False) # Used for runa10 and runa11 a17 a18 a19 a20-a25
     # models = generate_SSM_models([100, 500, 900], #, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
     #                              mup=True, learn_A=False, A_scale=0.0,
     #                              selective=True,
@@ -229,14 +229,16 @@ if __name__ == '__main__':
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=1.0, optimizer='sgd', cuda=False) # Used for run 9 and a10
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=3, lr=1.0, optimizer='sgd', cuda=False) # Used for test5
     # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=1.0, optimizer='sgd', cuda=False) # Used for a11
-    df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=0.1, optimizer='sgd', cuda=False) # Used for a12 a17
+    df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=0.1, optimizer='sgd', cuda=False) # Used for a12 a17 a18 a19 a20 a25
+    # df = get_coord_data(models, dataloader, nseeds=100, nsteps=1, lr=0.1, optimizer='sgd', cuda=False) # Used for a21
+    # df = get_coord_data(models, dataloader, nseeds=50, nsteps=1, lr=0.1, optimizer='sgd', cuda=False) # Used for a22 a23 a24
 
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Used for runa7
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=0.1, optimizer='sgd', cuda=False)
 
-    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runa17.pkl")  
+    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runa25.pkl")  
     # This saves the coord check plots to filename.
-    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runa17.png'
+    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runa25.png'
     import numpy as np
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     plot_coord_data(df.dropna(), save_to=filename)
