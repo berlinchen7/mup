@@ -280,6 +280,8 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
         behavior by setting `one_hot_target=True`.
     
     '''
+    # torch.cuda.memory._record_memory_history(max_entries=100000)
+
     df = []
 
     if specific_seed is not None:
@@ -308,6 +310,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
             model = model.train()
             if cuda:
                 model = model.cuda()
+
             optimizer = optcls(model)
             for batch_idx, batch in enumerate(dataloader, 1):
                 remove_hooks = []
@@ -359,9 +362,20 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                 for handle in remove_hooks:
                     handle.remove()
 
-                if batch_idx == nsteps: break
+                if batch_idx == nsteps: break                
             if show_progress:
                 pbar.update(1)
+            
+            # torch.cuda.memory._dump_snapshot('/home/berlin/mup/mem_snapshot.pickle')
+            # del model.kernel
+            del remove_hooks, name, batch, data, target, handle, module, model, output, loss, optimizer, 
+            torch.cuda.empty_cache()
+            # if width == 4100:
+            #     break        
+            # print(f"torch.cuda.memory_allocated() is {torch.cuda.memory_allocated()}")
+
+    # torch.cuda.memory._record_memory_history(enabled=None)
+
     if show_progress:
         pbar.close()
     return pd.DataFrame(df)

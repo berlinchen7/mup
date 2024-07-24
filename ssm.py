@@ -122,10 +122,15 @@ class SelectiveSSMKernel(nn.Module):
                  dt_max=0.1,
                  learn_A=True,
                  A_scale=1.0,
+                 cuda=False,
                  ):
         super().__init__()
         self.d_model = d_model # D, or the num of channels.
         self.N = N
+        if cuda:
+            self.device = 'cuda:0'
+        else:
+            self.device = 'cpu'
 
         if learn_A:
             self.A = nn.Parameter(torch.diag(torch.rand(N)*A_scale))
@@ -182,9 +187,11 @@ class SelectiveSSMKernel(nn.Module):
             #         self.C(rearrange('b d l -> b l d', u))
             # )
 
-            h = torch.zeros(batch_size, self.N, self.d_model)
-            y = torch.zeros(u.size()) # B, H, L
+
+            h = torch.zeros(batch_size, self.N, self.d_model, device=self.device)
+            y = torch.zeros(u.size(), device=self.device) # B, H, L
             for l in range(L):
+                # print(f"self.device is {self.device} \t self.A.get_device() is {self.A.get_device()} \t h.get_device() is {h.get_device()}")
                 first_term = torch.einsum('nn,bnd->bnd', self.A, h) # NOTE: this assumes self.A is diagonal
                 second_term = torch.einsum('bn,bd->bnd', Bu[:, :, l], u[:, :, l])
                 h = first_term + second_term
