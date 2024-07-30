@@ -1,16 +1,3 @@
-# from mup.coord_check import example_plot_coord_check
-# from itertools import product
-# import seaborn as sns
-# import matplotlib.pyplot as plt
-# sns.set()
-
-# for arch, opt, bn, mup in product(['mlp', 'cnn'], ['sgd', 'adam'], [False, True], [False, True]):
-#   example_plot_coord_check(arch, opt, batchnorm=bn, mup=mup, nseeds=5, download_cifar=True, legend=None,
-#                   plotdir='coord_checks/')
-
-
-
-
 import torch
 from torchvision import transforms, datasets
 from mup.shape import set_base_shapes
@@ -56,6 +43,7 @@ def get_train_loader(batch_size, num_workers=0, shuffle=False, train=True, downl
 
     transform = transforms.Compose(
         [transforms.ToTensor(),
+        transforms.CenterCrop(32 // 8),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         transforms.Lambda(lambda x: torch.reshape(x, (3, x.size(1)*x.size(2)))),
         ])
@@ -125,7 +113,7 @@ def generate_depthwise1dCNN(width, bias=True, mup=True, readout_zero_init=True, 
 
 def generate_SSM_models(widths, 
                         num_input_channels=3, 
-                        d_state=1, 
+                        d_state=200, # TODO
                         mup=True, 
                         readout_zero_init=False,
                         **kernel_args,
@@ -202,11 +190,36 @@ if __name__ == '__main__':
     #                              mup=True, learn_A=False, A_scale=0.1,
     #                              selective=True,
     #                              readout_zero_init=False) # Used for runa10 and runa11 a17 a18 a19 a20-a25
-    models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4500], 
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4500,], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=True,
+    #                              readout_zero_init=False,
+    #                              cuda=True) # Used for a26 a28 a29 a30
+    models = generate_SSM_models([500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4500,], 
                                  mup=True, learn_A=False, A_scale=0.1,
                                  selective=True,
                                  readout_zero_init=False,
-                                 cuda=True) # Used for a26
+                                 cuda=True) # Used for testing purposes
+    # models = generate_SSM_models([2500, 3300, 4100, 4900, 5700, 6500,], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=True,
+    #                              readout_zero_init=False,
+    #                              cuda=True) # Used for a44
+    # models = generate_SSM_models([2500, 3300, 4100, 4900, 5700, 6500, 7300, 8100], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=True,
+    #                              readout_zero_init=False,
+    #                              cuda=True) # Used for a46
+    # models = generate_SSM_models([2500, 3300, 4100, 4900, 5700, 6500, 7300, 8100] + [i for i in range(8900, 20000, 800)], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=True,
+    #                              readout_zero_init=False,
+    #                              cuda=True) # Used for a47
+    # models = generate_SSM_models([100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 5000, 5500, 6000, 7000, 8000], 
+    #                              mup=True, learn_A=False, A_scale=0.1,
+    #                              selective=True,
+    #                              readout_zero_init=False,
+    #                              cuda=True) # Used for a26 a28 a29 a30
     # models = generate_SSM_models([100, 500, 900], #, 1300, 1700, 2100, 2500, 3300, 4100, 4900], 
     #                              mup=True, learn_A=False, A_scale=0.0,
     #                              selective=True,
@@ -219,7 +232,8 @@ if __name__ == '__main__':
 
     # make a dataloader with small batch size/seq len
     #   just for testing
-    dataloader = get_train_loader(batch_size=1, num_workers=0, shuffle=False, train=True, download=True)
+    dataloader = get_train_loader(batch_size=50, num_workers=0, shuffle=False, train=True, download=True)
+    # dataloader = get_train_loader(batch_size=5, num_workers=0, shuffle=False, train=True, download=True)
     # dataloader = get_train_loader(batch_size=10, num_workers=0, shuffle=False, train=True, download=True)
 
     # record data from the model activations over a few steps of training
@@ -235,16 +249,27 @@ if __name__ == '__main__':
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=3, lr=1.0, optimizer='sgd', cuda=False) # Used for test5
     # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=1.0, optimizer='sgd', cuda=False) # Used for a11
     # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=0.1, optimizer='sgd', cuda=False) # Used for a12 a17 a18 a19 a20 a25
-    df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=0.1, optimizer='sgd', cuda=True) # Used for a26
+    # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=0.1, optimizer='sgd', cuda=True) # Used for a26
+    # df = get_coord_data(models, dataloader, nseeds=10, nsteps=7, lr=2000.0, optimizer='sgd', cuda=True) # Used for a27test a28 a29 a30
+    # df = get_coord_data(models, dataloader, nseeds=40, nsteps=7, lr=10.0, optimizer='sgd', cuda=True) # Used for a35-a41
+    # df = get_coord_data(models, dataloader, nseeds=5, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a42
+    # df = get_coord_data(models, dataloader, nseeds=5, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a43
+    # df = get_coord_data(models, dataloader, nseeds=66, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a43
+    # df = get_coord_data(models, dataloader, nseeds=66, nsteps=10, lr=1.0, optimizer='sgd', cuda=True) # Used for a46
+    # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a42
+    df = get_coord_data(models, dataloader, nseeds=20, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for atest1
+
+
+
     # df = get_coord_data(models, dataloader, nseeds=100, nsteps=1, lr=0.1, optimizer='sgd', cuda=False) # Used for a21
     # df = get_coord_data(models, dataloader, nseeds=50, nsteps=1, lr=0.1, optimizer='sgd', cuda=False) # Used for a22 a23 a24
 
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Used for runa7
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=0.1, optimizer='sgd', cuda=False)
 
-    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runa26.pkl")  
+    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runatest1.pkl")  
     # This saves the coord check plots to filename.
-    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runa26.png'
+    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runatest1.png'
     import numpy as np
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     plot_coord_data(df.dropna(), save_to=filename)

@@ -490,9 +490,9 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                     model_names.append(n)
                 if isinstance(model.kernel, SelectiveSSMKernel):
                     # print("DEBUG 1")
-                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024,)
+                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024//(8**2),)
                 elif isinstance(model.kernel, NonSelectiveSSMKernel):
-                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024,)
+                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024//(8**2),)
                 else:
                     raise ValueError
             else:
@@ -582,11 +582,12 @@ def plot_coord_data(df, y='l1', save_to=None, suptitle=None, x='width', hue='mod
     hue_order = sorted(set(df['module']))
     if face_color is not None:
         fig.patch.set_facecolor(face_color)
-    ymin, ymax = min(df[y]), max(df[y])
+    ymin, ymax = min(df[y]), max(df[y]) # 0.0, 2**8 # TODO
+    # & (df['width'] > 2**10.5)
     for t in ts:
         t = int(t)
         plt.subplot(1, len(ts), t)
-        sns.lineplot(x=x, y=y, data=df[df.t == t], hue=hue, hue_order=hue_order, legend=legend if t == 1 else None)
+        sns.lineplot(x=x, y=y, data=df[(df.t == t)], hue=hue, hue_order=hue_order, legend=legend if t == 1 else None)
         plt.title(f't={t}')
         if t != 1:
             plt.ylabel('')

@@ -97,19 +97,6 @@ class NonSelectiveSSMKernel(nn.Module):
                                                                                     # since torch.kron creates a matrix too large to be materialized.
             return K
 
-
-    def register(self, name, tensor, lr=None):
-        """Register a tensor with a configurable learning rate and 0 weight decay"""
-
-        if lr == 0.0:
-            self.register_buffer(name, tensor)
-        else:
-            self.register_parameter(name, nn.Parameter(tensor))
-
-            optim = {"weight_decay": 0.0}
-            if lr is not None: optim["lr"] = lr
-            setattr(getattr(self, name), "_optim", optim)
-
     def __repr__(self):
         return f'NonSelectiveSSMKernel(num_A_param={np.prod(self.A.size())}, num_B_param={np.prod(self.B.size())}, num_C_param={np.prod(self.C.size())})'
 
@@ -137,25 +124,38 @@ class SelectiveSSMKernel(nn.Module):
         else:
             self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
         # For selective SSM, B is now a dual of hidden vector:
-        # scale = 1 / (self.d_model*self.N)**.5 # TODO
-        # self.B = nn.Parameter(torch.randn(d_model, N) * scale)
-        # self.C = nn.Parameter(torch.randn(d_model, N) * scale)
+        # Option A: Initialize with iid Gaussian (consistent with abc-parameterization of the Tensor Program)
+        scale = 1.0 # / (self.d_model)**.5
+        self.B = nn.Parameter(torch.randn(N, d_model) * scale)
+        self.C = nn.Parameter(torch.randn(N, d_model) * scale)
 
-        # self.register_buffer('B', torch.randn(d_model, N) * scale)
-        # self.register_buffer('C', torch.randn(d_model, N) * scale)
 
-        # self.B = nn.Parameter(torch.rand(d_model, N)/ (d_model**.5)) # TODO
-        # self.C = nn.Parameter(torch.rand(d_model, N)/ (d_model**.5)) # TODO
+        # Option B: Initialize with unif distribution:
+        # self.B = nn.Parameter(torch.rand(N, d_model)/ (d_model**.5))
+        # self.C = nn.Parameter(torch.rand(N, d_model)/ (d_model**.5))
 
-        import scipy
-        scale = (N/d_model)**.5
-        B_init, _ = scipy.linalg.qr(torch.rand(d_model, N))
-        C_init, _ = scipy.linalg.qr(torch.rand(d_model, N))
-        self.B = nn.Parameter(torch.tensor(B_init*scale))
-        self.C = nn.Parameter(torch.tensor(C_init*scale))
+        # Option C: Initialize with semi-orthogonal matrices:
+        # import scipy
+        # # scale = (1/N)**.5 #TODO
+        # scale = 1.0
+        # max_dim = max(d_model, N)
+        # # NOTE: B_init and C_init will have shape (max_dim, max_dim),
+        # # which is an orthogonal matrix drawn from the Haar measure:
+        # B_init = scipy.stats.ortho_group.rvs(max_dim) #scipy.linalg.qr(torch.rand(d_model, N)) #TODO
+        # C_init = scipy.stats.ortho_group.rvs(max_dim) #scipy.linalg.qr(torch.rand(d_model, N)) 
+        # B_init = B_init[:N, :d_model]
+        # C_init = C_init[:N, :d_model]
+        # self.B = nn.Parameter(torch.tensor(B_init*scale, dtype=torch.float))
+        # self.C = nn.Parameter(torch.tensor(C_init*scale, dtype=torch.float))
         
-        # self.B = nn.Linear(d_model, N, bias=False)
-        # self.C = nn.Linear(d_model, N, bias=False)
+
+        # Option D: Initalize with constant and stays constant:
+        # self.register_buffer('B', torch.randn(N, d_model) * scale)
+        # self.register_buffer('C', torch.randn(N, d_model) * scale)
+
+        # Option E: Initalize with Pytorch default for nn.Linear:
+        # self.B = nn.Linear(N, d_model, bias=False)
+        # self.C = nn.Linear(N, d_model, bias=False)
 
     def _compute_A_mat(self, A_n, L):
         A_mat = torch.zeros(L, L)
@@ -165,28 +165,11 @@ class SelectiveSSMKernel(nn.Module):
         return A_mat
 
     def forward(self, L, u=None):
-        """
-        If u is None then compute the materialized K matrix,
-        which transforms a flattened input vector of shape (L*d_model,)
-        to the output vector of the same shape, where the flattened vector
-        takes the form (x_1^1, ..., x_1^L, x_2^1, ..., x_2^L, ..., x_d^1, ..., x_d^L).
-
-        Otherwise, compute y using the recursive defn of SSM. In this case u.size() = (B, H, L)
-        """
         if u is not None:
             batch_size = u.size(0)
             # For selective state space: B and C are now a function of u: 
-            Bu = torch.einsum('dn,bdl->bnl', self.B, u) # size (B, N, L)
-            Cu = torch.einsum('dn,bdl->bnl', self.C, u)
-            # Bu = rearrange(
-            #         'b l n -> b n l',
-            #         self.B(rearrange('b d l -> b l d', u))
-            # )
-            # Cu = rearrange(
-            #         'b l n -> b n l',
-            #         self.C(rearrange('b d l -> b l d', u))
-            # )
-
+            Bu = torch.einsum('nd,bdl->bnl', self.B, u) # size (B, N, L)
+            Cu = torch.einsum('nd,bdl->bnl', self.C, u)
 
             h = torch.zeros(batch_size, self.N, self.d_model, device=self.device)
             y = torch.zeros(u.size(), device=self.device) # B, H, L
@@ -199,26 +182,6 @@ class SelectiveSSMKernel(nn.Module):
             return y
         else:
             raise NotImplementedError
-            K = torch.zeros(L*self.d_model, L*self.d_model)
-            for k in range(self.N):
-                # Make the lower triangular matrix
-                A_mat = self._compute_A_mat(self.A[k, k], L)
-                K += self.B[k]*self.C[k]*torch.kron(torch.eye(self.d_model), A_mat) # NOTE: this will fail with even moderately sized d_model (e.g., 100),
-                                                                                    # since torch.kron creates a matrix too large to be materialized.
-            return K
-
-
-    def register(self, name, tensor, lr=None):
-        """Register a tensor with a configurable learning rate and 0 weight decay"""
-
-        if lr == 0.0:
-            self.register_buffer(name, tensor)
-        else:
-            self.register_parameter(name, nn.Parameter(tensor))
-
-            optim = {"weight_decay": 0.0}
-            if lr is not None: optim["lr"] = lr
-            setattr(getattr(self, name), "_optim", optim)
 
     def __repr__(self):
         return f'SelectiveSSMKernel(num_A_param={np.prod(self.A.size())}, num_B_param={np.prod(self.B.size())}, num_C_param={np.prod(self.C.size())})'
@@ -285,7 +248,6 @@ class SSM(nn.Module):
                                     # we may induce a large activation,
                                     # which may destabilize training by
                                     # having explosive gradients.
-        # y = torch.clamp(y, min=(-2**4), max=(2**4)) # TODO
         y = self.down_project(y)
         return y
 
@@ -348,6 +310,7 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
 
         ssm_like_p = defaultdict(new_group) # for selective ssm
         upproj_like_p = defaultdict(new_group) # for debugging ssm
+        downproj_like_p = defaultdict(new_group) # for debugging ssm
 
         fixed_p = new_group()
         for i, p in enumerate(param_group['params']):
@@ -359,6 +322,9 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
                 continue
             if model_names is not None and ('up_project' in model_names[i]):
                 upproj_like_p[p.infshape.width_mult()]['params'].append(p)
+                continue
+            if model_names is not None and ('down_project' in model_names[i]):
+                downproj_like_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if p.infshape.ninf() == 1:
                 
@@ -389,11 +355,16 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
         for width_mult, group in upproj_like_p.items():
             # print(f"DEBUG A: width is {width_mult}")
             assert L is not None
-            group['lr'] = width_mult * group['lr'] / L 
+            group['lr'] = 0.0# width_mult * group['lr'] / (L*4*50) 
+        for width_mult, group in downproj_like_p.items():
+            # print(f"DEBUG A: width is {width_mult}")
+            assert L is not None
+            group['lr'] *= width_mult/L # width_mult * group['lr'] / (L*4*50) 
         new_param_groups.extend(list(matrix_like_p.values()) + \
                                 list(vector_like_p.values()) + \
                                 list(ssm_like_p.values()) + \
                                 list(upproj_like_p.values()) + \
+                                list(downproj_like_p.values()) + \
                                 [fixed_p])
     return impl(new_param_groups, **kwargs)
 
