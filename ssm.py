@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms, datasets
-from torch.optim import SGD
+from torch.optim import SGD, Adam
 from torch.nn import Linear
 from torch.nn.modules.conv import _ConvNd
 from einops import rearrange, repeat
@@ -120,19 +120,22 @@ class SelectiveSSMKernel(nn.Module):
             self.device = 'cpu'
 
         if learn_A:
-            self.A = nn.Parameter(torch.diag(torch.rand(N)*A_scale))
+            self.A = nn.Parameter(torch.diag(torch.rand(N)*A_scale + 0.1))
         else:
-            self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
+            self.register_buffer('A', torch.diag(torch.rand(N)*A_scale + 0.1), persistent=True)
         # For selective SSM, B is now a dual of hidden vector:
         # Option A: Initialize with iid Gaussian (consistent with abc-parameterization of the Tensor Program)
+        # Note that we shift the distribution away from the center so that
+        # Bu and Cu will scale like \Theta(d_model) by LLN
         scale = 1.0 # / (self.d_model)**.5
-        self.B = nn.Parameter(torch.randn(N, d_model) * scale)
-        self.C = nn.Parameter(torch.randn(N, d_model) * scale)
+        self.B = nn.Parameter(torch.randn(N, d_model) * scale + 1.5)
+        self.C = nn.Parameter(torch.randn(N, d_model) * scale + 1.5)
 
 
         # Option B: Initialize with unif distribution:
-        # self.B = nn.Parameter(torch.rand(N, d_model)/ (d_model**.5))
-        # self.C = nn.Parameter(torch.rand(N, d_model)/ (d_model**.5))
+        # scale = 1.0 # / (self.d_model)**.5
+        # self.B = nn.Parameter(torch.rand(N, d_model) * scale)
+        # self.C = nn.Parameter(torch.rand(N, d_model) * scale)
 
         # Option C: Initialize with semi-orthogonal matrices:
         # import scipy
@@ -171,6 +174,13 @@ class SelectiveSSMKernel(nn.Module):
             Bu = torch.einsum('nd,bdl->bnl', self.B, u) # size (B, N, L)
             Cu = torch.einsum('nd,bdl->bnl', self.C, u)
 
+            # Apply the multiplier per µP protocol:
+            Bu = Bu / (self.B.infshape.width_mult())
+            Cu = Cu / (self.C.infshape.width_mult())
+            # Bu = torch.ones(Bu.size(), device=self.device)
+            # Cu = torch.ones(Cu.size(), device=self.device)
+            # print(f"self.d_model is {self.d_model} \t\t\t torch.median(Bu) is {torch.median(Bu)};\t\t\t torch.median(Bu / (self.B.infshape.width_mult())) is {torch.median(Bu/(self.B.infshape.width_mult()))}")
+
             h = torch.zeros(batch_size, self.N, self.d_model, device=self.device)
             y = torch.zeros(u.size(), device=self.device) # B, H, L
             for l in range(L):
@@ -186,6 +196,24 @@ class SelectiveSSMKernel(nn.Module):
     def __repr__(self):
         return f'SelectiveSSMKernel(num_A_param={np.prod(self.A.size())}, num_B_param={np.prod(self.B.size())}, num_C_param={np.prod(self.C.size())})'
 
+class CustomMuReadout(nn.Module):
+
+    def __init__(self, fan_in, fan_out, dp_scale, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dp_scale = dp_scale
+        self.down_project = nn.Parameter(torch.randn(fan_out, fan_in) * 1.0 + 1.5)
+                    
+    def forward(self, x):
+        return torch.einsum('id,bd->bi', self.down_project, x)*self.dp_scale
+
+class CustomMuUpProject(nn.Module):
+
+    def __init__(self, fan_in, fan_out, up_scale, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.up_project = nn.Parameter(torch.randn(fan_out, fan_in) * up_scale + 1.5)
+                    
+    def forward(self, x):
+        return torch.einsum('di,bli->bld', self.up_project, x)
 
 
 class SSM(nn.Module):
@@ -207,7 +235,8 @@ class SSM(nn.Module):
         self.d_output = self.h
         self.transposed = transposed
 
-        self.up_project = nn.Linear(num_input_channels, d_model)
+        # self.up_project = nn.Linear(num_input_channels, d_model)
+        self.up_project = CustomMuUpProject(num_input_channels, d_model, 1.0)
 
         # Initialize SSM Kernel:
         self.use_kernel = use_kernel # Whether to compute SSM with materialized K matrix or the recursive definition of SSM
@@ -217,7 +246,9 @@ class SSM(nn.Module):
             self.kernel = NonSelectiveSSMKernel(self.h, N=self.n, **kernel_args)
 
         if mup:
-            self.down_project = MuReadout(d_model, 10, bias=True, readout_zero_init=readout_zero_init)
+            # self.down_project = MuReadout(d_model, 10, bias=True, readout_zero_init=readout_zero_init)
+            dp_scale = 1/(d_model)
+            self.down_project = CustomMuReadout(d_model, 10, dp_scale)
         else:
             self.down_project = nn.Linear(d_model, 10, bias=True)
 
@@ -243,11 +274,15 @@ class SSM(nn.Module):
         if not self.transposed: y = y.transpose(-1, -2)
 
         # y = u
+        # print(y.size())
         y = torch.sum(y, dim=2) / L # Average along L dimesion; note
                                     # that if we don't divide by L,
                                     # we may induce a large activation,
                                     # which may destabilize training by
                                     # having explosive gradients.
+        # y = y[:,:,0]
+        # y = self.down_project(y*(self.h**.5))
+        # y = torch.einsum('id,bd->bi', self.down_project, y)
         y = self.down_project(y)
         return y
 
@@ -351,21 +386,101 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
         for width_mult, group in ssm_like_p.items():
             # print(group, width_mult)
             assert L is not None
-            group['lr'] = group['lr'] * ssm_force_multiply / L#/ (width_mult**.5) # (width_mult**2) # (width_mult) TODO
+            # print(f"kernel width_mul is {width_mult}")
+            group['lr'] = group['lr'] * width_mult # * ssm_force_multiply #/ L#/ (width_mult**.5) # (width_mult**2) # (width_mult) TODO
+            assert 'lr' in group
         for width_mult, group in upproj_like_p.items():
             # print(f"DEBUG A: width is {width_mult}")
             assert L is not None
-            group['lr'] = 0.0# width_mult * group['lr'] / (L*4*50) 
+            # print(f"upproj width_mul is {width_mult}")
+            group['lr'] = group['lr'] * width_mult #/ (L)# width_mult * group['lr'] / (L*4*50) 
         for width_mult, group in downproj_like_p.items():
             # print(f"DEBUG A: width is {width_mult}")
             assert L is not None
-            group['lr'] *= width_mult/L # width_mult * group['lr'] / (L*4*50) 
+            # print(f"downproj width_mul is {width_mult}")
+            group['lr'] *= width_mult # width_mult * group['lr'] / (L*4*50)  # TODO NOTE should be * width_mult I believe.
         new_param_groups.extend(list(matrix_like_p.values()) + \
                                 list(vector_like_p.values()) + \
                                 list(ssm_like_p.values()) + \
                                 list(upproj_like_p.values()) + \
                                 list(downproj_like_p.values()) + \
                                 [fixed_p])
+    return impl(new_param_groups, **kwargs)
+
+def MuAdam(params, impl=Adam, decoupled_wd=False, model_names=None, ssm_force_multiply=1, L=None, **kwargs):
+    '''Adam with μP scaling.
+
+    Note for this to work properly, your model needs to have its base shapes set
+    already using `mup.set_base_shapes`.
+    
+    Inputs:
+        impl: the specific Adam-like optimizer implementation from torch.optim or
+            elsewhere 
+        decoupled_wd: if True, skips the mup scaling for weight decay, which should
+            be used for optimizer implementations that decouple weight decay from
+            learning rate. See https://github.com/microsoft/mup/issues/1 for a use case.
+    Outputs:
+        An instance of `impl` with refined parameter groups, each of which has the correctly
+        scaled learning rate according to mup.
+    '''
+    new_param_groups = []
+    for param_group in process_param_groups(params, **kwargs):
+        # For every existing param group, we split into several new groups
+        def new_group():
+            new_g = {k:v for k, v in param_group.items() if k != 'params'}
+            new_g['params'] = []
+            return new_g
+        # The matrix-like weights might need multiple groups since weights
+        # might have different width multipliers
+        matrix_like_p = defaultdict(new_group) # key is width_mult
+        vector_like_p = new_group()
+
+        ssm_like_p = defaultdict(new_group) # for selective ssm
+        upproj_like_p = defaultdict(new_group) # for debugging ssm
+        downproj_like_p = defaultdict(new_group) # for debugging ssm
+
+        for i, p in enumerate(param_group['params']):
+            assert hasattr(p, 'infshape'), (
+                f'A parameter with shape {p.shape} does not have `infshape` attribute. '
+                'Did you forget to call `mup.set_base_shapes` on the model?')
+            if model_names is not None and ('kernel' in model_names[i] or 'B' in model_names[i] or 'C' in model_names[i]):
+                ssm_like_p[p.infshape.width_mult()]['params'].append(p)
+                continue
+            if model_names is not None and ('up_project' in model_names[i]):
+                upproj_like_p[p.infshape.width_mult()]['params'].append(p)
+                continue
+            if model_names is not None and ('down_project' in model_names[i]):
+                downproj_like_p[p.infshape.width_mult()]['params'].append(p)
+                continue
+            if p.infshape.ninf() == 2:
+                matrix_like_p[p.infshape.width_mult()]['params'].append(p)
+            elif p.infshape.ninf() > 2:
+                raise NotImplementedError('more than 2 inf dimensions')
+            else:
+                vector_like_p['params'].append(p)
+        for width_mult, group in matrix_like_p.items():
+            # Scale learning rate and weight decay accordingly
+            group['lr'] /= width_mult
+            if not decoupled_wd:
+                group['weight_decay'] *= width_mult
+        # Do multiplication for ssm_like_p for now:
+        for width_mult, group in ssm_like_p.items():
+            # print(group, width_mult)
+            assert L is not None
+            group['lr'] *= 1.0 #/= width_mult #/ (width_mult**.5) # (width_mult**2) # (width_mult) TODO
+        for width_mult, group in upproj_like_p.items():
+            # print(f"DEBUG A: width is {width_mult}")
+            assert L is not None
+            group['lr'] *= 1.0# width_mult * group['lr'] / (L*4*50) 
+        for width_mult, group in downproj_like_p.items():
+            # print(f"DEBUG A: width is {width_mult}")
+            assert L is not None
+            group['lr'] *= 1.0 # /= width_mult#width_mult/L # width_mult * group['lr'] / (L*4*50) 
+        new_param_groups.extend(list(matrix_like_p.values()) + \
+                                list(ssm_like_p.values()) + \
+                                list(upproj_like_p.values()) + \
+                                list(downproj_like_p.values()) + \
+                                [vector_like_p])
     return impl(new_param_groups, **kwargs)
 
 def zip_infshape(base_dims, dims, fin_if_same=True):

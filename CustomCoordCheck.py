@@ -113,7 +113,7 @@ def generate_depthwise1dCNN(width, bias=True, mup=True, readout_zero_init=True, 
 
 def generate_SSM_models(widths, 
                         num_input_channels=3, 
-                        d_state=200, # TODO
+                        d_state=16, # TODO
                         mup=True, 
                         readout_zero_init=False,
                         **kernel_args,
@@ -195,7 +195,7 @@ if __name__ == '__main__':
     #                              selective=True,
     #                              readout_zero_init=False,
     #                              cuda=True) # Used for a26 a28 a29 a30
-    models = generate_SSM_models([500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4500,], 
+    models = generate_SSM_models(range(500, 10000, 500), #[500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4500, 4900, 5300, 5700], 
                                  mup=True, learn_A=False, A_scale=0.1,
                                  selective=True,
                                  readout_zero_init=False,
@@ -232,7 +232,7 @@ if __name__ == '__main__':
 
     # make a dataloader with small batch size/seq len
     #   just for testing
-    dataloader = get_train_loader(batch_size=50, num_workers=0, shuffle=False, train=True, download=True)
+    dataloader = get_train_loader(batch_size=20, num_workers=0, shuffle=False, train=True, download=True)
     # dataloader = get_train_loader(batch_size=5, num_workers=0, shuffle=False, train=True, download=True)
     # dataloader = get_train_loader(batch_size=10, num_workers=0, shuffle=False, train=True, download=True)
 
@@ -257,7 +257,7 @@ if __name__ == '__main__':
     # df = get_coord_data(models, dataloader, nseeds=66, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a43
     # df = get_coord_data(models, dataloader, nseeds=66, nsteps=10, lr=1.0, optimizer='sgd', cuda=True) # Used for a46
     # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a42
-    df = get_coord_data(models, dataloader, nseeds=20, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for atest1
+    df = get_coord_data(models, dataloader, nseeds=30, nsteps=7, lr=0.1, optimizer='adam', cuda=True) # Used for atest1
 
 
 

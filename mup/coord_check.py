@@ -481,7 +481,7 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                 if filter_trainable_by_name(name):
                     params.append(p)
         return params
-    from ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, MuSGD as SGDSSM
+    from ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, MuSGD as SGDSSM, MuAdam as AdamSSM
     if optimizer == 'sgd':
         def optcls(model):
             if isinstance(model, SSM):
@@ -499,7 +499,20 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                 return SGD(get_trainable(model), lr=lr)
 
     elif optimizer == 'adam':
-        optcls = lambda model: Adam(get_trainable(model), lr=lr)
+        def optcls(model):
+            if isinstance(model, SSM):
+                model_names = []
+                for n, _ in model.named_parameters():
+                    model_names.append(n)
+                if isinstance(model.kernel, SelectiveSSMKernel):
+                    # print("DEBUG 1")
+                    return AdamSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024//(8**2),)
+                elif isinstance(model.kernel, NonSelectiveSSMKernel):
+                    return AdamSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024//(8**2),)
+                else:
+                    raise ValueError
+            else:
+                return Adam(get_trainable(model), lr=lr)
     elif optimizer == 'adamw':
         optcls = lambda model: AdamW(get_trainable(model), lr=lr)
     elif optimizer is None:
