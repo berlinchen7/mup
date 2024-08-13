@@ -19,6 +19,7 @@ from mup import MuAdam, MuSGD, get_shapes, make_base_shapes, set_base_shapes
 import data
 import model as mdl
 
+torch.set_default_device('cuda')
 
 ###############################################################################
 # Training code
@@ -91,6 +92,9 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
     
     train_data = batchify(corpus.train, batch_size, device=args.device)
     df = get_coord_data(models, batchloader(train_data, args.bptt), mup=mup, lr=lr, optimizer=optimizer, flatten_output=True, nseeds=nseeds, nsteps=nsteps, lossfn='nll')
+    # print(optimizer)
+    # if mup and optimizer=='adam':
+    #     df.to_pickle("/home/berlin/mup/examples/Transformer/coord_checks/μp_trsfmr_adam_coord.pkl")  
 
     prm = 'μP' if mup else 'SP'
     return plot_coord_data(df, legend=legend,

@@ -2,6 +2,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
+from typing import Optional, Tuple
 
 from mup import MuReadout, MuSharedReadout
 
@@ -198,8 +200,8 @@ class TransformerEncoderLayer(Module):
         if self.linear2.bias is not None:
             constant_(self.linear2.bias, 0.)
 
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        # type: (Tensor, Optional[Tensor], Optional[Tensor]) -> Tensor
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False): # NOTE is_causal arg added by BC on Aug 8, 2024
+        # type: (Tensor, Optional[Tensor], Optional[Tensor], bool) -> Tensor
         r"""Pass the input through the encoder layer.
         Args:
             src: the sequence to the encoder layer (required).
@@ -251,6 +253,8 @@ class MultiheadAttention(Module):
     def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False,
                  add_zero_attn=False, kdim=None, vdim=None, attn_mult=1, encoder_var=1, standparam=False):
         super(MultiheadAttention, self).__init__()
+
+        self.batch_first = False # NOTE Added by BC on Aug 8, 2024
         self.embed_dim = embed_dim
         self.attn_mult = attn_mult
         self.kdim = kdim if kdim is not None else embed_dim

@@ -156,6 +156,8 @@ def get_lazy_models(arch, widths, mup=True, init='kaiming_fan_in_normal', readou
 
 if __name__ == '__main__':
 
+    torch.set_default_device('cuda:7')
+
     from mup.coord_check import get_coord_data, plot_coord_data
     # construct a dictionary of lazy μP models with differing widths
     # def lazy_model(width):
@@ -232,7 +234,7 @@ if __name__ == '__main__':
 
     # make a dataloader with small batch size/seq len
     #   just for testing
-    dataloader = get_train_loader(batch_size=20, num_workers=0, shuffle=False, train=True, download=True)
+    dataloader = get_train_loader(batch_size=10, num_workers=0, shuffle=False, train=True, download=True)
     # dataloader = get_train_loader(batch_size=5, num_workers=0, shuffle=False, train=True, download=True)
     # dataloader = get_train_loader(batch_size=10, num_workers=0, shuffle=False, train=True, download=True)
 
@@ -257,7 +259,7 @@ if __name__ == '__main__':
     # df = get_coord_data(models, dataloader, nseeds=66, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a43
     # df = get_coord_data(models, dataloader, nseeds=66, nsteps=10, lr=1.0, optimizer='sgd', cuda=True) # Used for a46
     # df = get_coord_data(models, dataloader, nseeds=50, nsteps=7, lr=1.0, optimizer='sgd', cuda=True) # Used for a42
-    df = get_coord_data(models, dataloader, nseeds=30, nsteps=7, lr=0.1, optimizer='adam', cuda=True) # Used for atest1
+    df = get_coord_data(models, dataloader, nseeds=5, nsteps=7, lr=0.1, optimizer='adam', cuda=True) # Used for atest1
 
 
 
@@ -267,9 +269,9 @@ if __name__ == '__main__':
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=10, lr=0.1, optimizer='sgd', cuda=False) # Used for runa7
     # df = get_coord_data(models, dataloader, nseeds=40, nsteps=6, lr=0.1, optimizer='sgd', cuda=False)
 
-    df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_runatest1.pkl")  
+    # df.to_pickle("/home/berlin/mup/coord_checks/df_pickle_mambarunatest28.pkl")  
     # This saves the coord check plots to filename.
-    filename = '/home/berlin/mup/coord_checks/ssm_mu1_runatest1.png'
+    filename = '/home/berlin/mup/coord_checks/ssm_mu1_mambarunatest29.png'
     import numpy as np
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     plot_coord_data(df.dropna(), save_to=filename)

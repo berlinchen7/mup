@@ -309,7 +309,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
             model = model()
             model = model.train()
             if cuda:
-                model = model.cuda()
+                model = model.cuda(torch.get_default_device())
 
             optimizer = optcls(model)
             for batch_idx, batch in enumerate(dataloader, 1):
@@ -333,7 +333,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                 else:
                     (data, target) = batch
                     if cuda:
-                        data, target = data.cuda(), target.cuda()
+                        data, target = data.cuda(torch.get_default_device()), target.cuda(torch.get_default_device())
                     if flatten_input:
                         data = data.view(data.size(0), -1)
                     output = model(data)
@@ -356,6 +356,8 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                         raise NotImplementedError(f'unknown `lossfn`: {lossfn}')
                 optimizer.zero_grad()
                 loss.backward()
+                # if batch_idx == 1:
+                #     print(f"DEBUG: \t d_model = {model.h} \t\t l1 = {FDICT['l1'](model.up_project.up_project.grad)*(model.h**2.0)}") # Temporary debug print (Aug 8, 2024)
                 optimizer.step()
                 
                 # remove hooks
@@ -633,7 +635,8 @@ def example_plot_coord_check(
     if widths is None:
         widths = 2**np.arange(7, 14) if arch == 'mlp' else 2**np.arange(3, 10)
     models = get_lazy_models(arch, widths, mup=mup, batchnorm=batchnorm, init=init, readout_zero_init=True)
-    df = get_coord_data(models, train_loader, mup=mup, lr=lr, optimizer=optimizer, flatten_input=arch == 'mlp', nseeds=nseeds, nsteps=nsteps, dict_in_out=dict_in_out)
+    df = get_coord_data(models, train_loader, mup=mup, lr=lr, optimizer=optimizer, flatten_input=arch == 'mlp', nseeds=nseeds, nsteps=nsteps, dict_in_out=dict_in_out,
+                        cuda=False)
 
     prm = 'μP' if mup else 'SP'
     bn = 'on' if batchnorm else 'off'
