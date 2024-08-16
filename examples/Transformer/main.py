@@ -105,6 +105,9 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
 
 if __name__ == '__main__':
 
+    import os
+    os.chdir('/home/berlin/mup/examples/Transformer') # NOTE Added by BC on Aug 14, 2024
+
     parser = argparse.ArgumentParser(description=
     '''
     PyTorch Wikitext-2 Transformer Language Model, with μP.

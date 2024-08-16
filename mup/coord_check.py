@@ -385,6 +385,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
 
 def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                     filter_trainable_by_name=None,
+                    hyperparam_mode=None,
                     **kwargs):
     '''Get coord data for coord check.
 
@@ -417,6 +418,8 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
             a function that returns a bool given module names (from
             `model.named_modules()`), or None. If not None, then only modules
             whose name yields True will be trained.
+        hyperparam_mode:
+            LR scaling mode. Currently supports: 'mup_fullalign', 'sp_fullalign'.
         nsteps: 
             number of steps to train the model
         dict_in_out:
@@ -483,7 +486,7 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                 if filter_trainable_by_name(name):
                     params.append(p)
         return params
-    from ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, MuSGD as SGDSSM, MuAdam as AdamSSM
+    from examples.SSMs.ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, AdamSSM, MuSGD as SGDSSM
     if optimizer == 'sgd':
         def optcls(model):
             if isinstance(model, SSM):
@@ -491,7 +494,6 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                 for n, _ in model.named_parameters():
                     model_names.append(n)
                 if isinstance(model.kernel, SelectiveSSMKernel):
-                    # print("DEBUG 1")
                     return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024//(8**2),)
                 elif isinstance(model.kernel, NonSelectiveSSMKernel):
                     return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024//(8**2),)
@@ -506,11 +508,8 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                 model_names = []
                 for n, _ in model.named_parameters():
                     model_names.append(n)
-                if isinstance(model.kernel, SelectiveSSMKernel):
-                    # print("DEBUG 1")
-                    return AdamSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024//(8**2),)
-                elif isinstance(model.kernel, NonSelectiveSSMKernel):
-                    return AdamSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024//(8**2),)
+                if isinstance(model.kernel, SelectiveSSMKernel) or isinstance(model.kernel, NonSelectiveSSMKernel):
+                    return AdamSSM(get_trainable(model), hyperparam_mode=hyperparam_mode, model_names=model_names, lr=lr,)
                 else:
                     raise ValueError
             else:

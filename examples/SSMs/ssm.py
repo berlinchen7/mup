@@ -1,5 +1,4 @@
 """Minimal version of SSM with extra options and features stripped out, for testing purposes.
-    Source: https://github.com/state-spaces/s4/blob/main/models/s4/s4d.py
 
     
 d_model is Chanels which is D
@@ -23,7 +22,7 @@ from einops import rearrange, repeat
 from mup.layer import MuReadout
 from mup.shape import rescale_linear_bias
 from mup.infshape import InfShape, InfDim
-
+BASEWIDTH = 3
 
 def get_train_loader(batch_size, num_workers=0, shuffle=False, train=True, download=False):
 
@@ -57,13 +56,10 @@ class NonSelectiveSSMKernel(nn.Module):
             self.register_buffer('A', torch.diag(torch.rand(N)*A_scale), persistent=True)
         self.B = nn.Parameter(torch.rand(N)*1) 
         self.C = nn.Parameter(torch.rand(N)*1)
-        # self.B = nn.Parameter(torch.ones(N)*1)
-        # self.C = nn.Parameter(torch.ones(N)*1) 
 
     def _compute_A_mat(self, A_n, L):
         A_mat = torch.zeros(L, L)
         for i in range(L):
-            # print(f"DEBUG: i is {i}")
             v = torch.ones(L - i) * (A_n**i)
             A_mat += torch.diag(v, -i)
         return A_mat
@@ -110,10 +106,14 @@ class SelectiveSSMKernel(nn.Module):
                  learn_A=True,
                  A_scale=1.0,
                  cuda=False,
+                 hyperparam_mode='mup_fullalign',
                  ):
         super().__init__()
         self.d_model = d_model # D, or the num of channels.
         self.N = N
+        self.width_mult = d_model/BASEWIDTH
+        assert hyperparam_mode in ['mup_fullalign', 'mup_noalign', 'sp_fullalign', 'sp_noalign']
+        self.hyperparam_mode = hyperparam_mode
         if cuda:
             self.device = torch.get_default_device() #'cuda:0'
         else:
@@ -122,53 +122,20 @@ class SelectiveSSMKernel(nn.Module):
         if learn_A:
             self.A = nn.Parameter(torch.rand(N)*A_scale + 0.1) # nn.Parameter(torch.diag(torch.rand(N)*A_scale + 0.1))
         else:
-            # self.register_buffer('A', torch.diag(torch.rand(N)*A_scale + 0.1), persistent=True)
-            A_scale_mu_adjustment = 1.0#1 / d_model # Adjustment needed due to broadcasting of A when computing deltaA
-            self.register_buffer('A', (torch.rand(N)*A_scale + 0.1)*A_scale_mu_adjustment, persistent=True)
-        # For selective SSM, B is now a dual of hidden vector:
-        # Option A: Initialize with iid Gaussian (consistent with abc-parameterization of the Tensor Program)
-        # Note that we shift the distribution away from the center so that
-        # Bu and Cu will scale like \Theta(d_model) by LLN
-        BC_scale_mu_adjustment = 1 / d_model # / (self.d_model)**.5
-        self.B = nn.Parameter((torch.randn(N, d_model) + .1) * BC_scale_mu_adjustment)
-        self.C = nn.Parameter((torch.randn(N, d_model) + .1) * BC_scale_mu_adjustment)
+            A_scale_mu_adjustment = 1.0
+            self.register_buffer('A', (torch.rand(N)*A_scale)*A_scale_mu_adjustment, persistent=True)
 
-        # Option B: Initialize with unif distribution:
-        # scale = 1.0 # / (self.d_model)**.5
-        # self.B = nn.Parameter(torch.rand(N, d_model) * scale)
-        # self.C = nn.Parameter(torch.rand(N, d_model) * scale)
-
-        # Option C: Initialize with semi-orthogonal matrices:
-        # import scipy
-        # # scale = (1/N)**.5
-        # scale = 1.0
-        # max_dim = max(d_model, N)
-        # # NOTE: B_init and C_init will have shape (max_dim, max_dim),
-        # # which is an orthogonal matrix drawn from the Haar measure:
-        # B_init = scipy.stats.ortho_group.rvs(max_dim) #scipy.linalg.qr(torch.rand(d_model, N))
-        # C_init = scipy.stats.ortho_group.rvs(max_dim) #scipy.linalg.qr(torch.rand(d_model, N)) 
-        # B_init = B_init[:N, :d_model]
-        # C_init = C_init[:N, :d_model]
-        # self.B = nn.Parameter(torch.tensor(B_init*scale, dtype=torch.float))
-        # self.C = nn.Parameter(torch.tensor(C_init*scale, dtype=torch.float))
-        
-
-        # Option D: Initalize with constant and stays constant:
-        # self.register_buffer('B', torch.randn(N, d_model) * scale)
-        # self.register_buffer('C', torch.randn(N, d_model) * scale)
-
-        # Option E: Initalize with Pytorch default for nn.Linear:
-        # self.B = nn.Linear(N, d_model, bias=False)
-        # self.C = nn.Linear(N, d_model, bias=False)
-
+        if 'mup' in self.hyperparam_mode:
+            BC_scale_adjustment = (self.width_mult)**(-.5)
+            Delta_scale = (1 / self.width_mult)**.5
+        elif 'sp' in self.hyperparam_mode:
+            BC_scale_adjustment = (self.width_mult)**(-.5)
+            Delta_scale = (1 / self.width_mult)**.5
+        self.B = nn.Parameter((torch.randn(N, d_model)) * BC_scale_adjustment)
+        self.C = nn.Parameter((torch.randn(N, d_model)) * BC_scale_adjustment)
         self.D = nn.Parameter(torch.ones(d_model))
 
-        import math
-        # def softplus_correction(x):
-        #     from scipy.special import lambertw
-        #     W_arg = -(2**(1 - 2*x))*x*math.log(x)
-        #     return (lambertw(W_arg) + 2*x*math.log(x)).real / math.log(2)
-        Delta_scale = (1 / d_model)**.5
+        self.Delta = nn.Parameter((torch.randn(d_model, d_model)) * Delta_scale) # NOTE not shifting randn here
 
         # Initialize dt bias so that F.softplus(dt_bias) is between dt_min/d_model and dt_max/d_model
         dt_min, dt_max = 0.001*Delta_scale, 0.1*Delta_scale
@@ -179,18 +146,9 @@ class SelectiveSSMKernel(nn.Module):
         ).clamp(min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
-        # self.dt_bias = nn.Parameter(inv_dt)
+        # self.dt_bias = nn.Parameter(inv_dt) # TODO delta bias set to a buffer
         self.register_buffer('dt_bias', inv_dt, persistent=True)
 
-        # TODO will need to change to relative scaling
-        self.Delta = nn.Parameter((torch.randn(d_model, d_model)) * Delta_scale) # NOTE not shifting randn here
-
-    def _compute_A_mat(self, A_n, L):
-        A_mat = torch.zeros(L, L)
-        for i in range(L):
-            v = torch.ones(L - i) * (A_n**i)
-            A_mat += torch.diag(v, -i)
-        return A_mat
 
     def forward(self, L, u=None):
         if u is not None:
@@ -198,21 +156,21 @@ class SelectiveSSMKernel(nn.Module):
             # For selective state space: B and C are now a function of u: 
             Bu = torch.einsum('nd,bdl->bnl', self.B, u) # size (B, N, L)
             Cu = torch.einsum('nd,bdl->bnl', self.C, u)
+     
+            # Apply multiplier:
+            if 'mup' in self.hyperparam_mode:
+                Bu = Bu * (self.width_mult**-.5)
+                Cu = Cu * (self.width_mult**-.5)
+            elif 'sp' in self.hyperparam_mode:
+                pass
 
-            # Apply the multiplier per µP protocol:
-            # Bu = Bu / (self.B.infshape.width_mult())
-            # Cu = Cu / (self.C.infshape.width_mult())
-            # Bu = torch.ones(Bu.size(), device=self.device)
-            # Cu = torch.ones(Cu.size(), device=self.device)
-            # print(f"self.d_model is {self.d_model} \t\t\t torch.median(Bu) is {torch.median(Bu)};\t\t\t torch.median(Bu / (self.B.infshape.width_mult())) is {torch.median(Bu/(self.B.infshape.width_mult()))}")
-
-            
             delta = torch.einsum('ed,bdl->bel', self.Delta, u)
-            shifted_delta = delta + self.dt_bias[..., None]
-            shifted_delta = F.relu(shifted_delta) #F.softplus(shifted_delta)
+            shifted_delta = delta
+            # shifted_delta = delta + self.dt_bias[..., None] # TODO Uncomment to apply delta bias
+            shifted_delta = F.softplus(shifted_delta)
             A = repeat(self.A, 'n -> d n', d=self.d_model)
-            deltaA = torch.einsum('bdl,dn->bdln', delta, A) # torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
-            DeltaB_u = torch.einsum('bdl,bnl,bdl->bdln', delta, Bu, u)
+            deltaA = torch.einsum('bdl,dn->bdln', shifted_delta, A) # torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+            DeltaB_u = torch.einsum('bdl,bnl,bdl->bdln', shifted_delta, Bu, u)
 
             h = torch.zeros(batch_size, self.d_model,  self.N, device=self.device)
             y = torch.zeros(u.size(), device=self.device) # B, H, L
@@ -229,25 +187,41 @@ class SelectiveSSMKernel(nn.Module):
     def __repr__(self):
         return f'SelectiveSSMKernel(num_A_param={np.prod(self.A.size())}, num_B_param={np.prod(self.B.size())}, num_C_param={np.prod(self.C.size())})'
 
-class CustomMuReadout(nn.Module):
-
-    def __init__(self, fan_in, fan_out, dp_scale, *args, **kwargs):
+class CustomSSMUpProject(nn.Module):
+    def __init__(self, fan_in, fan_out, width_mult, hyperparam_mode, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dp_scale = dp_scale
-        self.down_project = nn.Parameter((torch.randn(fan_out, fan_in) + 0.1)*dp_scale)
+        self.width_mult = width_mult
+        self.hyperparam_mode = hyperparam_mode
+        if 'mup' in hyperparam_mode:
+            self.up_project = nn.Parameter(torch.randn(fan_out, fan_in) * (width_mult**(-.5)))
+        elif 'sp' in hyperparam_mode:
+            self.up_project = nn.Parameter(torch.randn(fan_out, fan_in))
+        else:
+            raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
                     
     def forward(self, x):
-        return torch.einsum('id,bd->bi', self.down_project, x) #*self.dp_scale
+        if 'mup' in self.hyperparam_mode:
+            return torch.einsum('di,bli->bld', self.up_project, x)*(self.width_mult**(.5))
+        elif 'sp' in self.hyperparam_mode:
+            return torch.einsum('di,bli->bld', self.up_project, x)
 
-class CustomMuUpProject(nn.Module):
-
-    def __init__(self, fan_in, fan_out, up_scale, *args, **kwargs):
+class CustomSSMReadout(nn.Module):
+    def __init__(self, fan_in, fan_out, width_mult, hyperparam_mode, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.up_project = nn.Parameter((torch.randn(fan_out, fan_in) + 0.1) * up_scale)
+        self.width_mult = width_mult
+        self.hyperparam_mode = hyperparam_mode
+        if 'mup' in hyperparam_mode:
+            self.down_project = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
+        elif 'sp' in hyperparam_mode:
+            self.down_project = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
+        else:
+            raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
                     
     def forward(self, x):
-        return torch.einsum('di,bli->bld', self.up_project, x)
-
+        if 'mup' in self.hyperparam_mode:
+            return torch.einsum('id,bd->bi', self.down_project, x)*(self.width_mult**(-.5))
+        elif 'sp' in self.hyperparam_mode:
+            return torch.einsum('id,bd->bi', self.down_project, x)
 
 class SSM(nn.Module):
     def __init__(self, 
@@ -255,10 +229,11 @@ class SSM(nn.Module):
                  d_model, 
                  d_state=64, 
                  transposed=True, 
-                 mup=True, 
-                 use_kernel=False,
+                 hyperparam_mode='mup_fullalign',     # Currently supports: 'mup_fullalign', 'sp_fullalign', 'sp_noalign'
+                 mup=True,                            # Deprecated
+                 use_kernel=False,                    # Whether to compute SSM with materialized K matrix or the recursive definition of SSM
                  selective=False,
-                 readout_zero_init=False,
+                 readout_zero_init=False,             # Deprecated
                  **kernel_args,
                  ):
         super().__init__()
@@ -267,23 +242,19 @@ class SSM(nn.Module):
         self.n = d_state
         self.d_output = self.h
         self.transposed = transposed
+        width_mult = float(d_model/BASEWIDTH)
+        self.hyperparam_mode=hyperparam_mode
 
-        # self.up_project = nn.Linear(num_input_channels, d_model)
-        self.up_project = CustomMuUpProject(num_input_channels, d_model, 1.0)
+        self.up_project = CustomSSMUpProject(num_input_channels, d_model, width_mult, hyperparam_mode=hyperparam_mode)
 
         # Initialize SSM Kernel:
-        self.use_kernel = use_kernel # Whether to compute SSM with materialized K matrix or the recursive definition of SSM
+        self.use_kernel = use_kernel
         if selective:
-            self.kernel = SelectiveSSMKernel(self.h, N=self.n, **kernel_args)
+            self.kernel = SelectiveSSMKernel(self.h, N=self.n, hyperparam_mode=hyperparam_mode, **kernel_args)
         else:
             self.kernel = NonSelectiveSSMKernel(self.h, N=self.n, **kernel_args)
 
-        if mup:
-            # self.down_project = MuReadout(d_model, 10, bias=True, readout_zero_init=readout_zero_init)
-            dp_scale = 1/(d_model)
-            self.down_project = CustomMuReadout(d_model, 10, dp_scale)
-        else:
-            self.down_project = nn.Linear(d_model, 10, bias=True)
+        self.down_project = CustomSSMReadout(d_model, 10, width_mult, hyperparam_mode=hyperparam_mode)
 
 
     def forward(self, u, **kwargs): # absorbs return_output and transformer src mask
@@ -300,22 +271,16 @@ class SSM(nn.Module):
             u = rearrange(u, 'b l h -> b (l h)')
             u = torch.einsum('ij,bj->bi', K, u) 
             y = rearrange(u, 'b (l h) -> b h l', l=L)
-            # print(y.size())
         else:
             y = self.kernel(L=L, u=u)
 
         if not self.transposed: y = y.transpose(-1, -2)
 
-        # y = u
-        # print(y.size())
         y = torch.sum(y, dim=2) / L # Average along L dimesion; note
                                     # that if we don't divide by L,
                                     # we may induce a large activation,
                                     # which may destabilize training by
                                     # having explosive gradients.
-        # y = y[:,:,0]
-        # y = self.down_project(y*(self.h**.5))
-        # y = torch.einsum('id,bd->bi', self.down_project, y)
         y = self.down_project(y)
         return y
 
@@ -340,14 +305,9 @@ def process_param_groups(params, **kwargs):
             param_group['lr'] = kwargs['lr']
         if 'weight_decay' not in param_group:
             param_group['weight_decay'] = kwargs.get('weight_decay', 0.)
-
-    # if 'model_names' in kwargs:
-    #     assert len(param_groups) == 1
-    #     param_groups[0]['model_names'] = kwargs['model_names']
-
     return param_groups
 
-
+# TODO: Will need to update MuSGD for correct µ scaling behavior.
 def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_multiply=1, L=None, **kwargs):
     '''SGD with μP scaling.
 
@@ -419,7 +379,7 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
             # print(group, width_mult)
             assert L is not None
             # print(f"kernel width_mul is {width_mult}")
-            group['lr'] = group['lr'] * width_mult # * ssm_force_multiply #/ L#/ (width_mult**.5) # (width_mult**2) # (width_mult) TODO
+            group['lr'] = group['lr'] * width_mult # * ssm_force_multiply #/ L#/ (width_mult**.5) # (width_mult**2) # (width_mult)
             assert 'lr' in group
         for width_mult, group in upproj_like_p.items():
             # print(f"DEBUG A: width is {width_mult}")
@@ -439,8 +399,8 @@ def MuSGD(params, impl=SGD, decoupled_wd=False, model_names=None, ssm_force_mult
                                 [fixed_p])
     return impl(new_param_groups, **kwargs)
 
-def MuAdam(params, impl=Adam, decoupled_wd=False, model_names=None, ssm_force_multiply=1, L=None, **kwargs):
-    '''Adam with μP scaling.
+def AdamSSM(params, impl=Adam, hyperparam_mode='mup_fullalign', decoupled_wd=False, model_names=None, L=None, **kwargs):
+    '''Adam with custom scaling of LR.
 
     Note for this to work properly, your model needs to have its base shapes set
     already using `mup.set_base_shapes`.
@@ -448,9 +408,12 @@ def MuAdam(params, impl=Adam, decoupled_wd=False, model_names=None, ssm_force_mu
     Inputs:
         impl: the specific Adam-like optimizer implementation from torch.optim or
             elsewhere 
+        hyperparam_mode: LR scaling mode. Currently supports: 'mup_fullalign', 'sp_fullalign'
         decoupled_wd: if True, skips the mup scaling for weight decay, which should
             be used for optimizer implementations that decouple weight decay from
             learning rate. See https://github.com/microsoft/mup/issues/1 for a use case.
+        model_names: [n for n, _ in model.named_parameters()]
+        L: input sequence length for the SSM.
     Outputs:
         An instance of `impl` with refined parameter groups, each of which has the correctly
         scaled learning rate according to mup.
@@ -462,17 +425,13 @@ def MuAdam(params, impl=Adam, decoupled_wd=False, model_names=None, ssm_force_mu
             new_g = {k:v for k, v in param_group.items() if k != 'params'}
             new_g['params'] = []
             return new_g
-        # The matrix-like weights might need multiple groups since weights
-        # might have different width multipliers
-        matrix_like_p = defaultdict(new_group) # key is width_mult
-        vector_like_p = new_group()
 
-        ssm_like_p = defaultdict(new_group) # for selective ssm
-        upproj_like_p = defaultdict(new_group) # for debugging ssm
-        downproj_like_p = defaultdict(new_group) # for debugging ssm
-        delta_like_p = defaultdict(new_group) # for debugging ssm
-        delta_bias_like_p = defaultdict(new_group) # for debugging ssm
-        skip_like_p = defaultdict(new_group) # for debugging ssm
+        BC_ssm_p = defaultdict(new_group)
+        upproj_p = defaultdict(new_group)
+        downproj_p = defaultdict(new_group)
+        delta_p = defaultdict(new_group)
+        delta_bias_p = defaultdict(new_group)
+        skip_p = defaultdict(new_group)
 
         for i, p in enumerate(param_group['params']):
             # print(model_names[i])
@@ -480,69 +439,85 @@ def MuAdam(params, impl=Adam, decoupled_wd=False, model_names=None, ssm_force_mu
                 f'A parameter with shape {p.shape} does not have `infshape` attribute. '
                 'Did you forget to call `mup.set_base_shapes` on the model?')
             if model_names is not None and ('B' in model_names[i] or 'C' in model_names[i]):
-                ssm_like_p[p.infshape.width_mult()]['params'].append(p)
+                BC_ssm_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and 'D' in model_names[i]:
-                skip_like_p[p.infshape.width_mult()]['params'].append(p)
+                skip_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and ('up_project' in model_names[i]):
-                upproj_like_p[p.infshape.width_mult()]['params'].append(p)
+                upproj_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and ('down_project' in model_names[i]):
-                downproj_like_p[p.infshape.width_mult()]['params'].append(p)
+                downproj_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and ('Delta' in model_names[i]):
-                delta_like_p[p.infshape.width_mult()]['params'].append(p)
+                delta_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and ('dt_bias' in model_names[i]):
-                # print(f"dt_bias: model_names[i] is {model_names[i]}")
-                delta_bias_like_p[p.infshape.width_mult()]['params'].append(p)
+                delta_bias_p[p.infshape.width_mult()]['params'].append(p)
                 continue
-            if p.infshape.ninf() == 2:
-                matrix_like_p[p.infshape.width_mult()]['params'].append(p)
-            elif p.infshape.ninf() > 2:
-                raise NotImplementedError('more than 2 inf dimensions')
-            else:
-                vector_like_p['params'].append(p)
-        for width_mult, group in matrix_like_p.items():
-            # Scale learning rate and weight decay accordingly
-            group['lr'] /= width_mult
-            if not decoupled_wd:
-                group['weight_decay'] *= width_mult
-        # Do multiplication for ssm_like_p for now:
-        for width_mult, group in ssm_like_p.items():
-            # print(group, width_mult)
-            assert L is not None
-            group['lr'] /= width_mult #/ (width_mult**.5) # (width_mult**2) # (width_mult)
-        for width_mult, group in skip_like_p.items():
-            # print(group, width_mult)
-            assert L is not None
-            group['lr'] /= width_mult #/ (width_mult**.5) # (width_mult**2) # (width_mult)
-        for width_mult, group in upproj_like_p.items():
-            # print(f"DEBUG A: width is {width_mult}")
-            assert L is not None
-            d_model = group['params'][0].size(0)
-            # print(width_mult)
-            group['lr'] *= 0.0 # *= width_mult**(1.5)#0.0 #*= 1.0 #1/(d_model**.5)#1.0# width_mult * group['lr'] / (L*4*50) TODO
-        for width_mult, group in downproj_like_p.items():
-            # print(f"DEBUG A: width is {width_mult}")
-            assert L is not None
-            group['lr'] /= width_mult#width_mult/L # width_mult * group['lr'] / (L*4*50) 
-        for width_mult, group in delta_like_p.items():
-            assert L is not None
-            group['lr'] /= width_mult #width_mult/L # width_mult * group['lr'] / (L*4*50) 
-        for width_mult, group in delta_bias_like_p.items():
-            assert L is not None
-            group['lr'] *= 1.0
 
-        new_param_groups.extend(list(matrix_like_p.values()) + \
-                                list(ssm_like_p.values()) + \
-                                list(upproj_like_p.values()) + \
-                                list(downproj_like_p.values()) + \
-                                list(delta_like_p.values()) + \
-                                list(delta_bias_like_p.values()) + \
-                                list(skip_like_p.values()) + \
-                                [vector_like_p])
+        if hyperparam_mode == 'mup_fullalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] /= width_mult**.5 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult  # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+        if hyperparam_mode == 'mup_noalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] /= width_mult**.5 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] *= 1.0 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult**.5  # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] *= 1.0 # Readout
+        elif hyperparam_mode == 'sp_fullalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] *= 1.0 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] /= width_mult # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult  # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] /= width_mult # Readout
+        elif hyperparam_mode == 'sp_noalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] *= 1.0 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult**.5  # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+        else:
+            raise ValueError(f'AdamSSM: hyperparam_mode = {hyperparam_mode} is not valid.')
+
+        new_param_groups.extend(list(BC_ssm_p.values()) + \
+                                list(upproj_p.values()) + \
+                                list(downproj_p.values()) + \
+                                list(delta_p.values()) + \
+                                list(delta_bias_p.values()) + \
+                                list(skip_p.values()))
     return impl(new_param_groups, **kwargs)
 
 def zip_infshape(base_dims, dims, fin_if_same=True):
@@ -600,8 +575,10 @@ def _zip_infshape_dict(base_shapes, shapes):
 
 
 def rescale_ssm(kernel):
-    # TODO rescale Selective kernel's B and C by 1/d_model. (currently it's being implemented in the
-    # class definition, and need to be migrated here for consistent formatting)
+    """
+    Currently, recaling of SSM's parameters is being implemented in the
+    class definition, but may need to be migrated here for consistent formatting.
+    """
     pass
 
 def set_base_shapes_custom(model, base, rescale_params=True, delta=None, savefile=None, do_assert=True):
@@ -648,213 +625,69 @@ def set_base_shapes_custom(model, base, rescale_params=True, delta=None, savefil
 
 
 def simple_train(model, base_model, num_steps):
-    train_loader = get_train_loader(1,) #, download=True)
+    """Barebone training code for testing purposes."""
 
+    train_loader = get_train_loader(1,) #, download=True)
     batch = next(iter(train_loader))
     (u, target) = batch
 
     set_base_shapes_custom(model, base_model, do_assert=False)
 
-    # model.kernel.A = model.kernel.A*0.1
-    # L = 2
-    # svd_k = torch.svd(model.kernel(L))
-    # cumsum = 0
-    # for l in range(L):
-    #     cumsum += model.kernel.A**l
-    # print(f"model.A is {model.kernel.A} \n and model.B is \n {model.kernel.B} \n and model.C is \n {model.kernel.C}")
-    # print(f"model.kernel is \n{model.kernel(L)}")
-    # print(f"svd of model.kernel is \n {svd_k[:]}")
-    # print(f"Theoretical spectral norm is {model.kernel.B*model.kernel.C*cumsum}")
-    # print(f"UV* is \n {svd_k[0]@ svd_k[2].T}")
-    # print(f"L = {L}\t norm_2(kernel) is {torch.linalg.norm(model.kernel(L), ord=2)}")
-    # L = 2
-    # print(model.kernel(L))
-
-    # return
-
     model_names = []
     for n, _ in model.named_parameters():
         model_names.append(n)
 
+    model = model.train()
+    model = model.cuda(torch.get_default_device())
+    u, target = u.cuda(torch.get_default_device()), target.cuda(torch.get_default_device())
+
     d_model = model.h
-    optimizer =  MuSGD(model.parameters(), 
+    optimizer =  AdamSSM(model.parameters(), 
                       model_names=model_names,
-                      lr=1.0, 
-                      momentum=0,
+                      lr=0.1, 
                       L=1024,
                       ssm_force_multiply=1/d_model,
                       )# SGD(model.parameters(), lr=1.0, momentum=0)
 
+
     for i in range(num_steps):
         optimizer.zero_grad()
-        # if i == 6:
-        #     print('hello')
         out = model(u)
 
         loss = F.cross_entropy(out, target)
         loss.backward()
-        # model.down_project.weight.grad = torch.zeros(model.down_project.weight.grad.size())
-        # model.down_project.bias.grad = torch.zeros(model.down_project.bias.grad.size())
-
-        # model.up_project.weight.grad = torch.zeros(model.up_project.weight.grad.size())
-        # model.up_project.bias.grad = torch.zeros(model.up_project.bias.grad.size())
-
-        # model.kernel.B.grad = torch.zeros(model.kernel.B.grad.size())
-        # model.kernel.C.grad = torch.zeros(model.kernel.C.grad.size())
-
-        # print(torch.sum(torch.abs(out)))
-
-        # print( torch.sum(torch.abs(model.down_project.weight)))
         optimizer.step()
 
-        # print(torch.sum(torch.abs(model.kernel.B.grad)))
-        # print(f"kernel.A is {model.kernel.A.item()}")
+    return torch.sum(torch.abs(model.kernel.D.grad)) 
 
-        # for name, p in model.named_parameters():
-        #     print(name, p)
-
-
-    # print(torch.sum(model.kernel.B.grad))
-    # print(model.kernel.B.grad.size())
-    # print(torch.sum(torch.abs(model.down_project.weight.grad)))
-
-    return torch.sum(torch.abs(out)) 
-
-    # for name, p in model.named_parameters():
-    #     print(f"name is {name}")
 
 if __name__ == "__main__":
     import numpy as np
     import statistics
 
-    d_state = 1
+    torch.set_default_device('cuda:6')
+
+    d_state = 16
     A_scale = 0.1
     use_kernel = False
     selective = True
     seeds = 5
-    num_steps = 7
+    num_steps = 3
 
-    d_models = [4100] #range(100, 1000, 100)# [1000, 2000, 3000, 4000, 5000]#[10, 100, 1000, 2000, 3000, 4000, 5000]
+    d_models = range(500, 10000, 500)
 
     base_sd = SSM(num_input_channels=3, d_model=3, d_state=d_state, 
                   mup=True, use_kernel=use_kernel, A_scale=A_scale, 
-                  selective=selective, readout_zero_init=False, learn_A=False)
+                  selective=selective, readout_zero_init=False, learn_A=False, cuda=True)
     for d_model in d_models:
         quantity = []
+        print(f"-------------{d_model}:")
         for seed in range(seeds):
             torch.manual_seed(seed)
             sd = SSM(num_input_channels=3, d_model=d_model, d_state=d_state, 
                     mup=True, use_kernel=use_kernel, A_scale=A_scale, 
-                    selective=selective, readout_zero_init=False, learn_A=False)
-            # if d_model != 2000:
-            #     continue
+                    selective=selective, readout_zero_init=False, learn_A=False, cuda=True)
             quantity.append(simple_train(sd, base_sd, num_steps=num_steps).item())
-            print(quantity)
-        print(f"{d_model} \t {quantity}")
-   
-        
-"""
-if __name__ == "__main__":
-
-    get_l1_norm = lambda x: torch.abs(x).mean(dtype=torch.float32)
-
-    seeds = 1#100
-    B, L = 1, 1
-    d_models = [100, 500, 900, 1300, 1700, 2100, 2500, 3300, 4100, 4900,]#[100, 1000, 5000, 10000, 15000, 20000, 25000]
-    d_models = d_models + list(range(5700, 35000, 800))
-
-    # d_models = [10]
-    # d_models = [100, 300, 500, 700, 900]# 1000, 5000, 10000, 15000]
-    # d_models = [5, 1000, 5000, 10000, 15000]
-
-
-    d_state = 1
-    num_steps = 40
-
-
-    steps_inp = []
-    quant_inp = []
-    dmodel_inp = []
-
-    # train_loader = get_train_loader(1)
-
-    # batch = next(iter(train_loader))
-    # (u, target) = batch
-
-
-    base_model = SelectiveSSMKernel(d_model=3, 
-                                        N=d_state,
-                                        learn_A=False,
-                                        A_scale=0.0,
-                                        )
-
-    for seed in tqdm(range(seeds)):
-        torch.manual_seed(seed)
-        for d_model in d_models:
-            # print(d_model)
-        
-            model = SelectiveSSMKernel(d_model=d_model, 
-                                        N=d_state,
-                                        learn_A=False,
-                                        A_scale=0.0,
-                                        )
-            set_base_shapes_custom(model, base_model, do_assert=False)
-            # input = torch.rand(B, d_model, L)
-            input = torch.ones(B, d_model, L)*1.0
-            target = torch.ones(B, d_model, L)*5.01
-
-            model_names = []
-            for n, _ in model.named_parameters():
-                model_names.append(n)
-            # print(model_names)
-
-            optimizer =  MuSGD(model.parameters(), 
-                            model_names=model_names,
-                            lr=0.1, 
-                            momentum=0,
-                            ssm_force_multiply=1/d_model
-                        )
-
-            # optimizer = MuSGD(model.parameters(), lr=1.0, momentum=0) #SGD(model.parameters(), lr=0.001, momentum=0)
-
-            for i in range(num_steps):
-                optimizer.zero_grad()
-
-                # K = model(L=L)
-                # K.retain_grad()
-                # u = rearrange(input, 'b l h -> b (l h)')
-                # u = torch.einsum('ij,bj->bi', K, u)
-                # out = rearrange(u, 'b (l h) -> b h l', l=L)
-
-
-                out = model(L, input)
-                # out.retain_grad()
-
-                # loss = nn.MSELoss(reduction='mean')
-                # output = loss(out, target) #torch.sum(out)/d_model#
-                output = torch.sum((out - target)**2) / d_model
-                output.backward()
-                optimizer.step()
-
-                if i == 39:
-                    # print(f"d_model is {d_model} \t\t B.grad is {model.B.grad.item()} \t\t output is {get_l1_norm(out).item()} ")
-                    print(f"d_model is {d_model} \t\t |B.grad|*/ d_model**.5 is {torch.linalg.matrix_norm(model.B.grad.T, ord=2) / d_model**.5} \t\t output is {get_l1_norm(out).item()} ")
-                    # print(f"d_model is {d_model} \t\t \t\t output is {get_l1_norm(out).item()} ")
-                #     print(f"output is {output}; get_l1_norm(out) is {get_l1_norm(out)}")
-                # print(K)
-                # print(K.grad)
-
-                steps_inp.append(i)
-                quant_inp.append((get_l1_norm(out)).item())
-                dmodel_inp.append(d_model)
-                # print(f"B.grad is {model.B.grad}")
-                # for name, p in model.named_parameters():
-                #     print(name, p)
-
-    import pandas as pd
-    import seaborn as sns
-    df = pd.DataFrame({"steps": steps_inp, "quantity": quant_inp, "d_model": dmodel_inp})
-    fig = sns.lineplot(df, x="d_model", y="quantity", hue="steps").get_figure()
-    fig.savefig("out3.png") 
-
-"""
+        print(quantity)
+        print(statistics.median(quantity))
+        # print(f"{d_model} \t {quantity}")
