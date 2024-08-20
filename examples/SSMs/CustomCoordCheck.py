@@ -155,8 +155,8 @@ def get_lazy_models(arch, widths, mup=True, init='kaiming_fan_in_normal', readou
 
 if __name__ == '__main__':
 
-    torch.set_default_device('cuda:7')
-    hyperparam_mode='mup_noalign'
+    torch.set_default_device('cuda:0')
+    hyperparam_mode='mf_fullalign'
 
     from mup.coord_check import get_coord_data, plot_coord_data
     # models = get_lazy_models('depthwise_1dcnn', [3, 6, 12, 24, 48, 96, 192, 384], mup=True,)
@@ -167,15 +167,17 @@ if __name__ == '__main__':
                                  cuda=True,
                                  hyperparam_mode=hyperparam_mode,) 
 
-    dataloader = get_train_loader(batch_size=20, num_workers=0, shuffle=False, train=True, download=True)
-    df = get_coord_data(models, dataloader, nseeds=5, nsteps=7, lr=0.1, optimizer='adam', cuda=True, hyperparam_mode=hyperparam_mode)
+    dataloader = get_train_loader(batch_size=2, num_workers=0, shuffle=False, train=True, download=True) # by default, batch_size=20
+    df = get_coord_data(models, dataloader, nseeds=1, nsteps=7, lr=0.1, optimizer='adam', cuda=True, hyperparam_mode=hyperparam_mode) # by default nseeds=5
 
-    # df.to_pickle("/home/berlin/mup/examples/SSMs/coord_checks/ssm_mu1_runb4_spfullalign.pkl")  
-    # This saves the coord check plots to filename.
-    filename = '/home/berlin/mup/examples/SSMs/coord_checks/ssm_mu1_runb7_mupnoalign.png'
+    exp_name = 'ssm_mu1_runb29_mf_fullalign_nseeds1BatchSize1WithEx1'
+    import os
+    os.makedirs('/n/fs/scratch/bc2188/mup/examples/SSMs/coord_checks', exist_ok=True)
+    df.to_pickle(f"/n/fs/scratch/bc2188/mup/examples/SSMs/coord_checks/{exp_name}.pkl")  
+    png_filename = f'/n/fs/scratch/bc2188/mup/examples/SSMs/coord_checks/{exp_name}.png'
     import numpy as np
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    plot_coord_data(df.dropna(), save_to=filename)
+    plot_coord_data(df.dropna(), save_to=png_filename)
     # If you are in jupyter notebook, you can also do
     #   `plt.show()`
     # to show the plot

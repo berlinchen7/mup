@@ -112,7 +112,6 @@ class SelectiveSSMKernel(nn.Module):
         self.d_model = d_model # D, or the num of channels.
         self.N = N
         self.width_mult = d_model/BASEWIDTH
-        assert hyperparam_mode in ['mup_fullalign', 'mup_noalign', 'sp_fullalign', 'sp_noalign']
         self.hyperparam_mode = hyperparam_mode
         if cuda:
             self.device = torch.get_default_device() #'cuda:0'
@@ -131,6 +130,12 @@ class SelectiveSSMKernel(nn.Module):
         elif 'sp' in self.hyperparam_mode:
             BC_scale_adjustment = (self.width_mult)**(-.5)
             Delta_scale = (1 / self.width_mult)**.5
+        elif 'ntk' in self.hyperparam_mode:
+            BC_scale_adjustment = 1.0
+            Delta_scale =  1.0
+        elif 'mf' in self.hyperparam_mode:
+            BC_scale_adjustment = 1.0
+            Delta_scale =  1.0
         self.B = nn.Parameter((torch.randn(N, d_model)) * BC_scale_adjustment)
         self.C = nn.Parameter((torch.randn(N, d_model)) * BC_scale_adjustment)
         self.D = nn.Parameter(torch.ones(d_model))
@@ -158,13 +163,22 @@ class SelectiveSSMKernel(nn.Module):
             Cu = torch.einsum('nd,bdl->bnl', self.C, u)
      
             # Apply multiplier:
+            Delta_multiplier = 1.0
             if 'mup' in self.hyperparam_mode:
                 Bu = Bu * (self.width_mult**-.5)
                 Cu = Cu * (self.width_mult**-.5)
             elif 'sp' in self.hyperparam_mode:
                 pass
+            elif 'ntk' in self.hyperparam_mode:
+                Bu = Bu * (self.width_mult**-.5)
+                Cu = Cu * (self.width_mult**-.5)
+                Delta_multiplier *= (self.width_mult**-.5)
+            elif 'mf' in self.hyperparam_mode:
+                Bu = Bu * (self.width_mult**-1.0)
+                Cu = Cu * (self.width_mult**-1.0)
+                Delta_multiplier *= (self.width_mult**-.5)
 
-            delta = torch.einsum('ed,bdl->bel', self.Delta, u)
+            delta = torch.einsum('ed,bdl->bel', self.Delta, u)*Delta_multiplier
             shifted_delta = delta
             # shifted_delta = delta + self.dt_bias[..., None] # TODO Uncomment to apply delta bias
             shifted_delta = F.softplus(shifted_delta)
@@ -196,6 +210,10 @@ class CustomSSMUpProject(nn.Module):
             self.up_project = nn.Parameter(torch.randn(fan_out, fan_in) * (width_mult**(-.5)))
         elif 'sp' in hyperparam_mode:
             self.up_project = nn.Parameter(torch.randn(fan_out, fan_in))
+        elif 'ntk' in hyperparam_mode:
+            self.up_project = nn.Parameter(torch.randn(fan_out, fan_in))
+        elif 'mf' in hyperparam_mode:
+            self.up_project = nn.Parameter(torch.randn(fan_out, fan_in))
         else:
             raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
                     
@@ -203,6 +221,10 @@ class CustomSSMUpProject(nn.Module):
         if 'mup' in self.hyperparam_mode:
             return torch.einsum('di,bli->bld', self.up_project, x)*(self.width_mult**(.5))
         elif 'sp' in self.hyperparam_mode:
+            return torch.einsum('di,bli->bld', self.up_project, x)
+        elif 'ntk' in self.hyperparam_mode:
+            return torch.einsum('di,bli->bld', self.up_project, x)
+        elif 'mf' in self.hyperparam_mode:
             return torch.einsum('di,bli->bld', self.up_project, x)
 
 class CustomSSMReadout(nn.Module):
@@ -214,6 +236,10 @@ class CustomSSMReadout(nn.Module):
             self.down_project = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
         elif 'sp' in hyperparam_mode:
             self.down_project = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
+        elif 'ntk' in hyperparam_mode:
+            self.down_project = nn.Parameter((torch.randn(fan_out, fan_in)))
+        elif 'mf' in hyperparam_mode:
+            self.down_project = nn.Parameter((torch.randn(fan_out, fan_in)))
         else:
             raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
                     
@@ -222,6 +248,10 @@ class CustomSSMReadout(nn.Module):
             return torch.einsum('id,bd->bi', self.down_project, x)*(self.width_mult**(-.5))
         elif 'sp' in self.hyperparam_mode:
             return torch.einsum('id,bd->bi', self.down_project, x)
+        elif 'ntk' in self.hyperparam_mode:
+            return torch.einsum('id,bd->bi', self.down_project, x)*(self.width_mult**(-.5))
+        elif 'mf' in self.hyperparam_mode:
+            return torch.einsum('id,bd->bi', self.down_project, x)*(self.width_mult**(-1.0))
 
 class SSM(nn.Module):
     def __init__(self, 
@@ -229,7 +259,7 @@ class SSM(nn.Module):
                  d_model, 
                  d_state=64, 
                  transposed=True, 
-                 hyperparam_mode='mup_fullalign',     # Currently supports: 'mup_fullalign', 'sp_fullalign', 'sp_noalign'
+                 hyperparam_mode='mup_fullalign',     # Currently supports: {mup, sp, ntk, mf}_{full, no}align
                  mup=True,                            # Deprecated
                  use_kernel=False,                    # Whether to compute SSM with materialized K matrix or the recursive definition of SSM
                  selective=False,
@@ -470,7 +500,7 @@ def AdamSSM(params, impl=Adam, hyperparam_mode='mup_fullalign', decoupled_wd=Fal
                 group['lr'] /= width_mult # Entry-wise
             for width_mult, group in downproj_p.items():
                 group['lr'] /= width_mult**.5 # Readout
-        if hyperparam_mode == 'mup_noalign':
+        elif hyperparam_mode == 'mup_noalign':
             for width_mult, group in upproj_p.items():
                 group['lr'] /= width_mult**.5 # Embedding
             for width_mult, group in BC_ssm_p.items():
@@ -509,6 +539,58 @@ def AdamSSM(params, impl=Adam, hyperparam_mode='mup_fullalign', decoupled_wd=Fal
                 group['lr'] /= width_mult # Entry-wise
             for width_mult, group in downproj_p.items():
                 group['lr'] /= width_mult**.5 # Readout
+        elif hyperparam_mode == 'ntk_fullalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] *= 1.0 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult**.5 # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+        elif hyperparam_mode == 'ntk_noalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] *= 1.0 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] *= 1.0 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] *= 1.0 # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] *= 1.0 # Readout
+        elif hyperparam_mode == 'mf_fullalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] *= 1.0 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] *= 1.0 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult**.5 # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] *= 1.0 # Readout
+        elif hyperparam_mode == 'mf_noalign':
+            for width_mult, group in upproj_p.items():
+                group['lr'] *= 1.0 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] *= width_mult**.5 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] *= 1.0 # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] *= width_mult**.5 # Readout
         else:
             raise ValueError(f'AdamSSM: hyperparam_mode = {hyperparam_mode} is not valid.')
 

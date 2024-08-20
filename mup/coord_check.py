@@ -293,7 +293,15 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
         seeds_iter = range(nseeds)
 
     if fix_data:
-        batch = next(iter(dataloader))
+        dataloader_iter = iter(dataloader)
+        # batch = next(dataloader_iter)
+        ex_num = 1
+
+        for i in range(ex_num):
+            batch = next(dataloader_iter) # TODO: repeated next() to get the second example
+        # batch = next(dataloader_iter) # TODO: repeated next() to get the third example
+        # batch = next(dataloader_iter) # TODO: repeated next() to get the fourth example
+        # batch = next(dataloader_iter) # TODO: repeated next() to get the fifth example
         dataloader = [batch] * nsteps
     if show_progress:
         from tqdm import tqdm
