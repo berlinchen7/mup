@@ -103,20 +103,28 @@ class SelectiveSSMKernel(nn.Module):
                  N=64, 
                  dt_min=0.001, 
                  dt_max=0.1,
-                 learn_A=True,
-                 A_scale=1.0,
-                 cuda=False,
+                 learn_A=False,
+                 A_scale=0.1,
+                 cuda=False, # Deprecated
+                 device=None,
                  hyperparam_mode='mup_fullalign',
+                 dtype=torch.float,
+                 d_model_base=None,
                  ):
         super().__init__()
         self.d_model = d_model # D, or the num of channels.
         self.N = N
-        self.width_mult = d_model/BASEWIDTH
-        self.hyperparam_mode = hyperparam_mode
-        if cuda:
-            self.device = torch.get_default_device() #'cuda:0'
+        self.d_model_base = d_model_base
+        if d_model_base is not None:
+            self.width_mult = int(d_model/ d_model_base)
         else:
-            self.device = 'cpu'
+            self.width_mult = d_model/BASEWIDTH
+        self.hyperparam_mode = hyperparam_mode
+    
+        if device is not None:
+            self.device = device
+        else:
+            self.device = torch.get_default_device()
 
         if learn_A:
             self.A = nn.Parameter(torch.rand(N)*A_scale + 0.1) # nn.Parameter(torch.diag(torch.rand(N)*A_scale + 0.1))
@@ -180,6 +188,8 @@ class SelectiveSSMKernel(nn.Module):
 
             delta = torch.einsum('ed,bdl->bel', self.Delta, u)*Delta_multiplier
             shifted_delta = delta
+            # print(u.size(), self.width_mult, self.d_model_base)
+            # raise RuntimeError
             # shifted_delta = delta + self.dt_bias[..., None] # TODO Uncomment to apply delta bias
             shifted_delta = F.softplus(shifted_delta)
             A = repeat(self.A, 'n -> d n', d=self.d_model)
@@ -468,20 +478,26 @@ def AdamSSM(params, impl=Adam, hyperparam_mode='mup_fullalign', decoupled_wd=Fal
             assert hasattr(p, 'infshape'), (
                 f'A parameter with shape {p.shape} does not have `infshape` attribute. '
                 'Did you forget to call `mup.set_base_shapes` on the model?')
+            # print(model_names[i])
             if model_names is not None and ('B' in model_names[i] or 'C' in model_names[i]):
+                # print("'B' and 'C' detected")
                 BC_ssm_p[p.infshape.width_mult()]['params'].append(p)
                 continue
-            if model_names is not None and 'D' in model_names[i]:
-                skip_p[p.infshape.width_mult()]['params'].append(p)
-                continue
-            if model_names is not None and ('up_project' in model_names[i]):
+            if model_names is not None and (('up_project' in model_names[i]) or ('embed' in model_names[i])):
+                # print("embedd detected")
                 upproj_p[p.infshape.width_mult()]['params'].append(p)
                 continue
-            if model_names is not None and ('down_project' in model_names[i]):
+            if model_names is not None and (('down_project' in model_names[i]) or ('decode' in model_names[i])):
+                # print("decode detected")
                 downproj_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and ('Delta' in model_names[i]):
+                # print("Delta detected")
                 delta_p[p.infshape.width_mult()]['params'].append(p)
+                continue
+            if model_names is not None and 'D' in model_names[i]:
+                # print("D detected")
+                skip_p[p.infshape.width_mult()]['params'].append(p)
                 continue
             if model_names is not None and ('dt_bias' in model_names[i]):
                 delta_bias_p[p.infshape.width_mult()]['params'].append(p)
@@ -499,7 +515,7 @@ def AdamSSM(params, impl=Adam, hyperparam_mode='mup_fullalign', decoupled_wd=Fal
             for width_mult, group in skip_p.items():
                 group['lr'] /= width_mult # Entry-wise
             for width_mult, group in downproj_p.items():
-                group['lr'] /= width_mult**.5 # Readout
+                group['lr'] *= 1.0 #/= width_mult**.5 # Readout
         elif hyperparam_mode == 'mup_noalign':
             for width_mult, group in upproj_p.items():
                 group['lr'] /= width_mult**.5 # Embedding

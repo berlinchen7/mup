@@ -16,8 +16,9 @@ except:
 from mup.coord_check import get_coord_data, plot_coord_data
 from mup import MuAdam, MuSGD, get_shapes, make_base_shapes, set_base_shapes
 
-import data
-import model as mdl
+import examples.SSMs.data as data
+from examples.SSMs.mixer_seq_simple import MixerModelWithSimpleHead
+from examples.SSMs.ssm import set_base_shapes_custom
 
 torch.set_default_device('cuda')
 
@@ -70,46 +71,75 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
     corpus = data.Corpus(data_dir)
     ntokens = len(corpus.dictionary)
 
+    n_layer = args.nlayers
+
     def gen(w, standparam=False):
-        import model as _model
         def f():
-            model = _model.TransformerModel(args, ntokens, ninp=w, nhead=args.nhead, nhid=w*args.ffn_ratio, nlayers=args.nlayers, dropout=args.dropout,
-                                            tied=args.tied, bias=args.bias, encoder_var=args.init_var, 
-                                            decoder_var=args.init_var, standparam=standparam).to(args.device)
+            base_model = MixerModelWithSimpleHead(
+                        d_model = args.d_model_base,
+                        n_layer = n_layer,
+                        vocab_size = ntokens,
+                        d_intermediate = 0,
+                        ssm_cfg=None,
+                        device=None,
+                        dtype=None,
+                        
+                        hyperparam_mode=args.hyperparam_mode,
+                        d_model_base=args.d_model_base,
+                        ).to(args.device)
+            model = MixerModelWithSimpleHead(
+                        d_model = w,
+                        n_layer = n_layer,
+                        vocab_size = ntokens,
+                        d_intermediate = 0,
+                        ssm_cfg=None,
+                        device=None,
+                        dtype=None,
+                        
+                        hyperparam_mode=args.hyperparam_mode,
+                        d_model_base=args.d_model_base,
+                        ).to(args.device)
             model = setprec(model, args.precision)
-            if standparam:
-                set_base_shapes(model, None)
-            else:
-                assert args.load_base_shapes, 'load_base_shapes needs to be nonempty'
-                set_base_shapes(model, args.load_base_shapes)
+
+            set_base_shapes_custom(model, base_model)
+
+            # if standparam:
+            #     set_base_shapes(model, None)
+            # else:
+            #     assert args.load_base_shapes, 'load_base_shapes needs to be nonempty'
+            #     set_base_shapes(model, args.load_base_shapes)
             return model
         return f
 
     optimizer = optimizer.replace('mu', '')
-    widths = 2**np.arange(7, 14 if optimizer=='sgd' else 12)
+    widths = 2**np.arange(7, 15) #2**np.arange(7, 14 if optimizer=='sgd' else 12)
     models = {w: gen(w, standparam=not mup) for w in widths}
 
     
     train_data = batchify(corpus.train, batch_size, device=args.device)
 
-    breakpoint()
-
-    df = get_coord_data(models, batchloader(train_data, args.bptt), mup=mup, lr=lr, optimizer=optimizer, flatten_output=True, nseeds=nseeds, nsteps=nsteps, lossfn='nll')
+    df = get_coord_data(models, batchloader(train_data, args.bptt), mup=mup, lr=lr, optimizer=optimizer, 
+                        flatten_output=True, nseeds=nseeds, nsteps=nsteps, lossfn='nll', cuda=True,
+                        hyperparam_mode=args.hyperparam_mode)
     # print(optimizer)
     # if mup and optimizer=='adam':
     #     df.to_pickle("/home/berlin/mup/examples/Transformer/coord_checks/μp_trsfmr_adam_coord.pkl")  
 
     prm = 'μP' if mup else 'SP'
-    return plot_coord_data(df, legend=legend,
-        save_to=os.path.join(plotdir, f'{prm.lower()}_trsfmr_{optimizer}_coord.png'),
-        suptitle=f'{prm} Transformer {optimizer} lr={lr} nseeds={nseeds}',
+    exp_name = f'{prm.lower()}_ssm_{optimizer}_coord'
+    # df.to_pickle(f"{plotdir}/{exp_name}.pkl")  
+    df.to_csv(f"{plotdir}/{exp_name}.csv") 
+
+    return plot_coord_data(df, legend=True,#legend,
+        save_to=os.path.join(plotdir, f'{prm.lower()}_ssm_{optimizer}_coord.png'),
+        suptitle=f'{prm} SSM {optimizer} lr={lr} nseeds={nseeds}',
         face_color='xkcd:light grey' if not mup else None)
 
 
 if __name__ == '__main__':
 
     import os
-    os.chdir('/n/fs/scratch/bc2188/mup/examples/Transformer') # NOTE Added by BC on Aug 14, 2024
+    os.chdir('/n/fs/scratch/bc2188/mup/examples/SSMs') # NOTE Added by BC on Aug 14, 2024
 
     parser = argparse.ArgumentParser(description=
     '''
@@ -197,7 +227,10 @@ if __name__ == '__main__':
     parser.add_argument('--coord_check_nseeds', type=int, default=3,
                         help='number of seeds for testing correctness of μ parametrization')
     parser.add_argument('--deferred_init', action='store_true', help='Skip instantiating the base and delta models for mup. Requires torchdistx.')
-    
+    parser.add_argument('--hyperparam_mode', type=str, help='hyperparam_mode.')
+    parser.add_argument('--d_model_base', type=int, help='d_model of the base model.')
+
+
     args = parser.parse_args()
 
     print(args)
@@ -209,6 +242,9 @@ if __name__ == '__main__':
             print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
     device = args.device = torch.device("cuda" if args.cuda else "cpu")
+
+    # torch.set_default_device('cuda:0')
+    # print(device, torch.get_default_device())
 
     ###############################################################################
     # Load data
@@ -312,8 +348,9 @@ if __name__ == '__main__':
         import os
         os.makedirs('coord_checks', exist_ok=True)
         plotdir = 'coord_checks'
+        torch.set_default_device('cuda:0')
         coord_check(mup=True, lr=args.lr, optimizer=args.optimizer, batch_size=args.batch_size, nsteps=args.coord_check_nsteps, nseeds=args.coord_check_nseeds, data_dir=args.data, args=args, plotdir=plotdir, legend=False)
-        coord_check(mup=False, lr=args.lr, optimizer=args.optimizer, batch_size=args.batch_size, nsteps=args.coord_check_nsteps, nseeds=args.coord_check_nseeds, data_dir=args.data, args=args, plotdir=plotdir, legend=False)
+        # coord_check(mup=False, lr=args.lr, optimizer=args.optimizer, batch_size=args.batch_size, nsteps=args.coord_check_nsteps, nseeds=args.coord_check_nseeds, data_dir=args.data, args=args, plotdir=plotdir, legend=False)
         import sys; sys.exit()
 
 

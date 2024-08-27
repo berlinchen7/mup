@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from torch import nn, Tensor
 
-from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
+# from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 
 
 class Block(nn.Module):
@@ -34,6 +34,7 @@ class Block(nn.Module):
         else:
             self.mlp = None
         if self.fused_add_norm:
+            raise ValueError
             assert RMSNorm is not None, "RMSNorm import fails"
             assert isinstance(
                 self.norm, (nn.LayerNorm, RMSNorm)
@@ -50,10 +51,11 @@ class Block(nn.Module):
         """
         if not self.fused_add_norm:
             residual = (hidden_states + residual) if residual is not None else hidden_states
-            hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
+            hidden_states = residual #self.norm(residual.to(dtype=self.norm.weight.dtype)) # NOTE Commented out since it is incompatible with self.norm = nn.Identity 
             if self.residual_in_fp32:
                 residual = residual.to(torch.float32)
         else:
+            raise ValueError
             hidden_states, residual = layer_norm_fn(
                 hidden_states,
                 self.norm.weight,
@@ -64,7 +66,12 @@ class Block(nn.Module):
                 eps=self.norm.eps,
                 is_rms_norm=isinstance(self.norm, RMSNorm)
             )
-        hidden_states = self.mixer(hidden_states, inference_params=inference_params, **mixer_kwargs)
+        if inference_params is None: # NOTE This condition is intended for SelectiveSSMKernel only
+            sequence_length = hidden_states.size(2)
+            # print(f"hidden_states.size() is {hidden_states.size()}; residual is {residual}")
+            hidden_states = self.mixer(sequence_length, hidden_states, **mixer_kwargs)
+        else:
+            hidden_states = self.mixer(hidden_states, inference_params=inference_params, **mixer_kwargs)
 
         if self.mlp is not None:
             if not self.fused_add_norm:
@@ -73,6 +80,7 @@ class Block(nn.Module):
                 if self.residual_in_fp32:
                     residual = residual.to(torch.float32)
             else:
+                raise ValueError
                 hidden_states, residual = layer_norm_fn(
                     hidden_states,
                     self.norm2.weight,

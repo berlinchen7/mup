@@ -344,6 +344,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                         data, target = data.cuda(torch.get_default_device()), target.cuda(torch.get_default_device())
                     if flatten_input:
                         data = data.view(data.size(0), -1)
+                    # breakpoint()
                     output = model(data)
                     if flatten_output:
                         output = output.view(-1, output.shape[-1])
@@ -495,6 +496,7 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
                     params.append(p)
         return params
     from examples.SSMs.ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, AdamSSM, MuSGD as SGDSSM
+    from examples.SSMs.mixer_seq_simple import MixerModelWithSimpleHead
     if optimizer == 'sgd':
         def optcls(model):
             if isinstance(model, SSM):
@@ -512,14 +514,11 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
 
     elif optimizer == 'adam':
         def optcls(model):
-            if isinstance(model, SSM):
+            if isinstance(model, SSM) or isinstance(model, MixerModelWithSimpleHead):
                 model_names = []
                 for n, _ in model.named_parameters():
                     model_names.append(n)
-                if isinstance(model.kernel, SelectiveSSMKernel) or isinstance(model.kernel, NonSelectiveSSMKernel):
-                    return AdamSSM(get_trainable(model), hyperparam_mode=hyperparam_mode, model_names=model_names, lr=lr,)
-                else:
-                    raise ValueError
+                return AdamSSM(get_trainable(model), hyperparam_mode=hyperparam_mode, model_names=model_names, lr=lr,)
             else:
                 return Adam(get_trainable(model), lr=lr)
     elif optimizer == 'adamw':

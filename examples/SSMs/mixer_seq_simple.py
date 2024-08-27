@@ -8,29 +8,31 @@ import copy
 
 from collections import namedtuple
 
+import einops
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # from mamba_ssm.models.config_mamba import MambaConfig
-from mamba_ssm.modules.mamba_simple import Mamba
-from mamba_ssm.modules.mamba2 import Mamba2
-from mamba_ssm.modules.mha import MHA
-from mamba_ssm.modules.mlp import GatedMLP
-from mamba_ssm.modules.block import Block
+# from mamba_ssm.modules.mamba_simple import Mamba
+# from mamba_ssm.modules.mamba2 import Mamba2
+# from mamba_ssm.modules.mha import MHA
+# from mamba_ssm.modules.mlp import GatedMLP
+from examples.SSMs.ssm import SelectiveSSMKernel
+from examples.SSMs.block import Block
 # from mamba_ssm.utils.generation import GenerationMixin
 # from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
-from ssm import SSM
 
 
-try:
-    from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
-except ImportError:
-    RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
+# try:
+#     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
+# except ImportError:
+RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
 def create_block(
     d_model,
-    d_intermediate,
+    d_intermediate=0,
     ssm_cfg=None,
     attn_layer_idx=None,
     attn_cfg=None,
@@ -41,34 +43,45 @@ def create_block(
     layer_idx=None,
     device=None,
     dtype=None,
+
+    hyperparam_mode='mup_fullalign',
+    d_model_base=16,
 ):
-    if ssm_cfg is None:
-        ssm_cfg = {}
-    if attn_layer_idx is None:
-        attn_layer_idx = []
-    if attn_cfg is None:
-        attn_cfg = {}
+    # if ssm_cfg is None:
+    #     ssm_cfg = {}
+    # if attn_layer_idx is None:
+    #     attn_layer_idx = []
+    # if attn_cfg is None:
+    #     attn_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
-    if layer_idx not in attn_layer_idx:
-        # Create a copy of the config to modify
-        ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
-        ssm_layer = ssm_cfg.pop("layer", "Mamba1")
-        if ssm_layer not in ["Mamba1", "Mamba2"]:
-            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2")
-        mixer_cls = partial(
-            Mamba2 if ssm_layer == "Mamba2" else Mamba,
-            layer_idx=layer_idx,
-            **ssm_cfg,
-            **factory_kwargs
-        )
-    else:
-        mixer_cls = partial(MHA, layer_idx=layer_idx, **attn_cfg, **factory_kwargs)
-    norm_cls = partial(
-        nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
-    )
+    # if layer_idx not in attn_layer_idx:
+    #     # Create a copy of the config to modify
+    #     ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
+    #     ssm_layer = ssm_cfg.pop("layer", "Mamba1")
+    #     if ssm_layer not in ["Mamba1", "Mamba2"]:
+    #         raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2")
+    #     mixer_cls = partial(
+    #         Mamba2 if ssm_layer == "Mamba2" else Mamba,
+    #         layer_idx=layer_idx,
+    #         **ssm_cfg,
+    #         **factory_kwargs
+    #     )
+    # else:
+    #     mixer_cls = partial(MHA, layer_idx=layer_idx, **attn_cfg, **factory_kwargs)
+
+    ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
+    ssm_cfg['hyperparam_mode'] = hyperparam_mode
+    ssm_cfg['d_model_base'] = d_model_base
+    mixer_cls = partial(SelectiveSSMKernel, **ssm_cfg,  **factory_kwargs) # Might modify to add 1dCNN along with layer_index
+    norm_cls = nn.Identity
+
+    # norm_cls = partial(
+    #     nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
+    # )
     if d_intermediate == 0:
         mlp_cls = nn.Identity
     else:
+        raise ValueError
         mlp_cls = partial(
             GatedMLP, hidden_features=d_intermediate, out_features=d_model, **factory_kwargs
         )
@@ -77,11 +90,8 @@ def create_block(
         mixer_cls,
         mlp_cls,
         norm_cls=norm_cls,
-        fused_add_norm=fused_add_norm,
-        residual_in_fp32=residual_in_fp32,
-    )
-    block = SSM(
-        num_input_channels=d_model
+        fused_add_norm=False,
+        residual_in_fp32=False,
     )
 
     block.layer_idx = layer_idx
@@ -120,14 +130,88 @@ def create_block(
 #                 with torch.no_grad():
 #                     p /= math.sqrt(n_residuals_per_layer * n_layer)
 
+class MixerModelEmbedding(nn.Module):
+    def __init__(self, fan_in, fan_out, width_mult, hyperparam_mode, *args, **kwargs):
+        """In this case, fan_in is vocab_size and fan_out is the embedding dimension,
+        which in mamba is d_model"""
+        super().__init__(*args, **kwargs)
+        self.width_mult = width_mult
+        self.vocab_size = fan_in
+        self.hyperparam_mode = hyperparam_mode
+        # NOTE: we initialize embed_w to be of shape (fan_in, fan_out), whereas
+        # we initizlie  decode_w in MixerModelDecoder to be of shape (fan_out, fan_in).
+        # The reason is to accommodate what F.embedding expects
+        if 'mup' in hyperparam_mode:
+            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out) * (width_mult**(-.5)))
+        elif 'sp' in hyperparam_mode:
+            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
+        elif 'ntk' in hyperparam_mode:
+            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
+        elif 'mf' in hyperparam_mode:
+            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
+        else:
+            raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
+                    
+    def forward(self, x):
+        """
+        x is of the form (sequence_length, batch_size).
+        First convert to one-hot, before applying self.embed_w,
+        along with hyperparam_mode specific multipliers.
 
-class MixerModel(nn.Module):
+        output should have the form (batch_size, embedding_dim, sequence_length)
+        """
+        # x_onehot = F.one_hot(x, num_classes=self.vocab_size) # size (seq_length, batch_size, vocab_size)
+        embeded = F.embedding(x, self.embed_w) # size (seq_length, batch_size, embedding_dim)
+        embeded = einops.rearrange(embeded, 'l b e -> b e l')
+
+        if 'mup' in self.hyperparam_mode:
+            return embeded*(self.width_mult**(.5))
+        elif 'sp' in self.hyperparam_mode:
+            return embeded
+        elif 'ntk' in self.hyperparam_mode:
+            return embeded
+        elif 'mf' in self.hyperparam_mode:
+            return embeded
+
+class MixerModelDecoder(nn.Module):
+    def __init__(self, fan_in, fan_out, width_mult, hyperparam_mode, *args, **kwargs):
+        """In this case, fan_in is embedding dimension and fan_out is vocab_size"""
+        super().__init__(*args, **kwargs)
+        self.width_mult = width_mult
+        self.hyperparam_mode = hyperparam_mode
+        if 'mup' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
+        elif 'sp' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
+        elif 'ntk' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
+        elif 'mf' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
+        else:
+            raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
+                    
+    def forward(self, x):
+        """x has shape (batch_size, d_model, sequence_length)
+        output has shape (sequence_length, batch_size, vocab_size)
+        """
+        x_t = einops.rearrange(x, "b h l -> b l h")
+        if 'mup' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-.5))
+        elif 'sp' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)
+        elif 'ntk' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-.5))
+        elif 'mf' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-1.0))
+
+
+class MixerModelWithSimpleHead(nn.Module):
     def __init__(
         self,
         d_model: int,
         n_layer: int,
-        d_intermediate: int,
         vocab_size: int,
+        d_intermediate: int = 0,
         ssm_cfg=None,
         attn_layer_idx=None,
         attn_cfg=None,
@@ -138,12 +222,23 @@ class MixerModel(nn.Module):
         residual_in_fp32=False,
         device=None,
         dtype=None,
+
+        hyperparam_mode='mup_fullalign',
+        d_model_base=5,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
 
-        self.embedding = nn.Embedding(vocab_size, d_model, **factory_kwargs)
+        # if ssm_cfg is not None and 'd_model_base' in ssm_cfg:
+        #     d_model_base = ssm_cfg['d_model_base']
+        # else:
+        #     d_model_base = 16
+        self.width_mult = int(d_model/d_model_base)
+        # print(self.width_mult)
+        self.hyperparam_mode = hyperparam_mode
+
+        self.embedding = MixerModelEmbedding(vocab_size, d_model, self.width_mult, self.hyperparam_mode)
 
         # # We change the order of residual and layer norm:
         # # Instead of LN -> Attn / MLP -> Add, we do:
@@ -169,23 +264,27 @@ class MixerModel(nn.Module):
                     fused_add_norm=fused_add_norm,
                     layer_idx=i,
                     **factory_kwargs,
+
+                    hyperparam_mode=hyperparam_mode,
+                    d_model_base=d_model_base,
                 )
                 for i in range(n_layer)
             ]
         )
 
-        self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
-            d_model, eps=norm_epsilon, **factory_kwargs
-        )
+        # self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
+        #     d_model, eps=norm_epsilon, **factory_kwargs
+        # )
 
-        self.apply(
-            partial(
-                _init_weights,
-                n_layer=n_layer,
-                **(initializer_cfg if initializer_cfg is not None else {}),
-                n_residuals_per_layer=1 if d_intermediate == 0 else 2,  # 2 if we have MLP
-            )
-        )
+        # self.apply(
+        #     partial(
+        #         _init_weights,
+        #         n_layer=n_layer,
+        #         **(initializer_cfg if initializer_cfg is not None else {}),
+        #         n_residuals_per_layer=1 if d_intermediate == 0 else 2,  # 2 if we have MLP
+        #     )
+        # )
+        self.decoder = MixerModelDecoder(d_model, vocab_size, self.width_mult, hyperparam_mode=hyperparam_mode)
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return {
@@ -198,12 +297,13 @@ class MixerModel(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                hidden_states, residual, inference_params=inference_params, **mixer_kwargs
+                hidden_states, None, inference_params=inference_params, **mixer_kwargs # Note: can change residual to None to get rid of residuals
             )
-        if not self.fused_add_norm:
+        if (not hasattr(self, 'fused_add_norm')) or (not self.fused_add_norm):
             residual = (hidden_states + residual) if residual is not None else hidden_states
-            hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
+            hidden_states = residual # NOTE: Got rid of norm_f here
         else:
+            raise ValueError
             # Set prenorm=False here since we don't need the residual
             hidden_states = layer_norm_fn(
                 hidden_states,
@@ -215,7 +315,10 @@ class MixerModel(nn.Module):
                 residual_in_fp32=self.residual_in_fp32,
                 is_rms_norm=isinstance(self.norm_f, RMSNorm)
             )
-        return hidden_states
+        # breakpoint()
+        output = self.decoder(hidden_states)
+        return output
+        # return F.log_softmax(output, dim=-1)
 
 
 # class MambaLMHeadModel(nn.Module, GenerationMixin):
@@ -313,3 +416,31 @@ class MixerModel(nn.Module):
 #         config_path = os.path.join(save_directory, 'config.json')
 #         with open(config_path, 'w') as f:
 #             json.dump(self.config.__dict__, f, indent=4)
+
+
+
+
+
+if __name__ == '__main__':
+    # create_block(d_model = 16,
+    #             d_intermediate=0,
+    #             ssm_cfg=None,
+    #             # attn_layer_idx=None,
+    #             # attn_cfg=None,
+    #             # norm_epsilon=1e-5,
+    #             # rms_norm=False,
+    #             # residual_in_fp32=False,
+    #             # fused_add_norm=False,
+    #             layer_idx=None,
+    #             device=None,
+    #             dtype=None)
+    m = MixerModelWithSimpleHead(
+        d_model = 16,
+        n_layer = 2,
+        vocab_size = 4,
+        d_intermediate = 0,
+        ssm_cfg=None,
+        device=None,
+        dtype=None,
+        hyperparam_mode='mup_fullallign')
+    print([n for n, _ in m.named_parameters()])
