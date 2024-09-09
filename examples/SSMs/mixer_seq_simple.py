@@ -139,7 +139,7 @@ class MixerModelEmbedding(nn.Module):
         self.vocab_size = fan_in
         self.hyperparam_mode = hyperparam_mode
         # NOTE: we initialize embed_w to be of shape (fan_in, fan_out), whereas
-        # we initizlie  decode_w in MixerModelDecoder to be of shape (fan_out, fan_in).
+        # we initialize decode_w in MixerModelDecoder to be of shape (fan_out, fan_in).
         # The reason is to accommodate what F.embedding expects
         if 'mup' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out) * (width_mult**(-.5)))
@@ -148,6 +148,8 @@ class MixerModelEmbedding(nn.Module):
         elif 'ntk' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
         elif 'mf' in hyperparam_mode:
+            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
+        elif 'umap' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
         else:
             raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
@@ -172,6 +174,10 @@ class MixerModelEmbedding(nn.Module):
             return embeded
         elif 'mf' in self.hyperparam_mode:
             return embeded
+        elif 'mf' in self.hyperparam_mode:
+            return embeded
+        else:
+            raise ValueError
 
 class MixerModelDecoder(nn.Module):
     def __init__(self, fan_in, fan_out, width_mult, hyperparam_mode, *args, **kwargs):
@@ -179,13 +185,16 @@ class MixerModelDecoder(nn.Module):
         super().__init__(*args, **kwargs)
         self.width_mult = width_mult
         self.hyperparam_mode = hyperparam_mode
+        self.fan_in = fan_in # Used for u-mup
         if 'mup' in hyperparam_mode:
-            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
+            self.decode_w = nn.Parameter(torch.randn(fan_out, fan_in)) #*(width_mult**(-.5))) #TODO: Consider temporary comment out the multiplier.
         elif 'sp' in hyperparam_mode:
             self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
         elif 'ntk' in hyperparam_mode:
             self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
         elif 'mf' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
+        elif 'umup' in hyperparam_mode:
             self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
         else:
             raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
@@ -203,6 +212,10 @@ class MixerModelDecoder(nn.Module):
             return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-.5))
         elif 'mf' in self.hyperparam_mode:
             return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-1.0))
+        elif 'umup' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.fan_in**(-1.0))
+        else:
+            raise ValueError
 
 
 class MixerModelWithSimpleHead(nn.Module):

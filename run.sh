@@ -25,5 +25,5 @@ srun --job-name "interactive" \
 	--ntasks-per-node=1 \
 	--gres=gpu:1 \
 	--export=ALL \
-	--time=1-02:00:00 \
+	--time=7-00:00:00 \
 	--pty bash -i

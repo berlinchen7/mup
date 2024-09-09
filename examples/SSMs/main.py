@@ -2,6 +2,7 @@
 import argparse
 import os
 import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -112,7 +113,7 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
         return f
 
     optimizer = optimizer.replace('mu', '')
-    widths = 2**np.arange(7, 15) #2**np.arange(7, 14 if optimizer=='sgd' else 12)
+    widths = 2**np.arange(7, 13) # 14) #2**np.arange(7, 14 if optimizer=='sgd' else 12)
     models = {w: gen(w, standparam=not mup) for w in widths}
 
     
@@ -125,13 +126,15 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
     # if mup and optimizer=='adam':
     #     df.to_pickle("/home/berlin/mup/examples/Transformer/coord_checks/μp_trsfmr_adam_coord.pkl")  
 
-    prm = 'μP' if mup else 'SP'
-    exp_name = f'{prm.lower()}_ssm_{optimizer}_coord'
+    prm = args.hyperparam_mode #'μP' if mup else 'SP'
+    
+    timestamp = datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
+    exp_name = f'coordcheck_ssmmixer_{args.hyperparam_mode}_{timestamp}'
     # df.to_pickle(f"{plotdir}/{exp_name}.pkl")  
     df.to_csv(f"{plotdir}/{exp_name}.csv") 
 
-    return plot_coord_data(df, legend=True,#legend,
-        save_to=os.path.join(plotdir, f'{prm.lower()}_ssm_{optimizer}_coord.png'),
+    return plot_coord_data(df, legend=legend,
+        save_to=os.path.join(plotdir, f'{exp_name}.png'),
         suptitle=f'{prm} SSM {optimizer} lr={lr} nseeds={nseeds}',
         face_color='xkcd:light grey' if not mup else None)
 
@@ -276,6 +279,7 @@ if __name__ == '__main__':
 
     ntokens = len(corpus.dictionary)
 
+    print(f"ntokens is {ntokens}")
 
 
     def evaluate(data_source):

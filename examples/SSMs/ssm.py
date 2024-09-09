@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms, datasets
 from torch.optim import SGD, Adam
-from torch.nn import Linear
+from torch.nn import Linear, RMSNorm
 from torch.nn.modules.conv import _ConvNd
 from einops import rearrange, repeat
 from mup.layer import MuReadout
@@ -100,7 +100,7 @@ class NonSelectiveSSMKernel(nn.Module):
 class SelectiveSSMKernel(nn.Module):
     def __init__(self, 
                  d_model, 
-                 N=64, 
+                 N=64,
                  dt_min=0.001, 
                  dt_max=0.1,
                  learn_A=False,
@@ -110,6 +110,8 @@ class SelectiveSSMKernel(nn.Module):
                  hyperparam_mode='mup_fullalign',
                  dtype=torch.float,
                  d_model_base=None,
+                 init_eps=0.1,
+                 norm='rms',
                  ):
         super().__init__()
         self.d_model = d_model # D, or the num of channels.
@@ -127,13 +129,16 @@ class SelectiveSSMKernel(nn.Module):
             self.device = torch.get_default_device()
 
         if learn_A:
-            self.A = nn.Parameter(torch.rand(N)*A_scale + 0.1) # nn.Parameter(torch.diag(torch.rand(N)*A_scale + 0.1))
+            self.A = nn.Parameter(torch.rand(N)*A_scale + init_eps) # nn.Parameter(torch.diag(torch.rand(N)*A_scale + 0.1))
         else:
             A_scale_mu_adjustment = 1.0
-            self.register_buffer('A', (torch.rand(N)*A_scale)*A_scale_mu_adjustment, persistent=True)
+            self.register_buffer('A', (torch.rand(N)*A_scale)*A_scale_mu_adjustment, persistent=True) 
+            # self.register_buffer('A', torch.zeros(N)*1.0, persistent=True) # NOTE used for debugging purposes
+
 
         if 'mup' in self.hyperparam_mode:
             BC_scale_adjustment = (self.width_mult)**(-.5)
+            # BC_scale_adjustment = 1.0
             Delta_scale = (1 / self.width_mult)**.5
         elif 'sp' in self.hyperparam_mode:
             BC_scale_adjustment = (self.width_mult)**(-.5)
@@ -144,11 +149,15 @@ class SelectiveSSMKernel(nn.Module):
         elif 'mf' in self.hyperparam_mode:
             BC_scale_adjustment = 1.0
             Delta_scale =  1.0
-        self.B = nn.Parameter((torch.randn(N, d_model)) * BC_scale_adjustment)
-        self.C = nn.Parameter((torch.randn(N, d_model)) * BC_scale_adjustment)
+        elif 'umup' in self.hyperparam_mode:
+            BC_scale_adjustment = 1.0
+            Delta_scale =  1.0
+        self.B = nn.Parameter((torch.randn(N, d_model) + init_eps) * BC_scale_adjustment)
+        self.C = nn.Parameter((torch.randn(N, d_model) + init_eps) * BC_scale_adjustment)
         self.D = nn.Parameter(torch.ones(d_model))
 
         self.Delta = nn.Parameter((torch.randn(d_model, d_model)) * Delta_scale) # NOTE not shifting randn here
+        # self.Delta = nn.Parameter((torch.ones(d_model, d_model))) # TODO Set to ones temperary as a debugging measure, as opposed to above
 
         # Initialize dt bias so that F.softplus(dt_bias) is between dt_min/d_model and dt_max/d_model
         dt_min, dt_max = 0.001*Delta_scale, 0.1*Delta_scale
@@ -162,19 +171,29 @@ class SelectiveSSMKernel(nn.Module):
         # self.dt_bias = nn.Parameter(inv_dt) # TODO delta bias set to a buffer
         self.register_buffer('dt_bias', inv_dt, persistent=True)
 
+        if norm == 'rms':
+            self.norm = RMSNorm(self.d_model)
+
 
     def forward(self, L, u=None):
         if u is not None:
             batch_size = u.size(0)
+            # """ TODO temporary commented out for debugging purposes
             # For selective state space: B and C are now a function of u: 
             Bu = torch.einsum('nd,bdl->bnl', self.B, u) # size (B, N, L)
             Cu = torch.einsum('nd,bdl->bnl', self.C, u)
+            # """
+            # stub = u.new_ones(u.size()) # TODO Temporary
+            # Bu = torch.einsum('nd,bdl->bnl', self.B, stub) # size (B, N, L)
+            # Cu = torch.einsum('nd,bdl->bnl', self.C, stub)
      
             # Apply multiplier:
             Delta_multiplier = 1.0
             if 'mup' in self.hyperparam_mode:
-                Bu = Bu * (self.width_mult**-.5)
+                Bu = Bu * (self.width_mult**-.5) # TODO Commented out for now
                 Cu = Cu * (self.width_mult**-.5)
+                # Bu = Bu * (self.width_mult**-.75) # NOTE Used for testing
+                # Cu = Cu * (self.width_mult**-.75) # NOTE Used for testing
             elif 'sp' in self.hyperparam_mode:
                 pass
             elif 'ntk' in self.hyperparam_mode:
@@ -185,25 +204,44 @@ class SelectiveSSMKernel(nn.Module):
                 Bu = Bu * (self.width_mult**-1.0)
                 Cu = Cu * (self.width_mult**-1.0)
                 Delta_multiplier *= (self.width_mult**-.5)
+            elif 'umup' in self.hyperparam_mode:
+                Bu = Bu * (self.d_model**-.5)
+                Cu = Cu * (self.d_model**-.5)
+                Delta_multiplier *= (self.d_model**-.5)
 
+            """ TODO temporary commented out for debugging purposes
             delta = torch.einsum('ed,bdl->bel', self.Delta, u)*Delta_multiplier
             shifted_delta = delta
             # print(u.size(), self.width_mult, self.d_model_base)
             # raise RuntimeError
             # shifted_delta = delta + self.dt_bias[..., None] # TODO Uncomment to apply delta bias
             shifted_delta = F.softplus(shifted_delta)
+            """
+
+            shifted_delta = self.Delta.new_ones(Bu.size(0), self.d_model, Bu.size(2)) # TODO temporary stub
+
             A = repeat(self.A, 'n -> d n', d=self.d_model)
             deltaA = torch.einsum('bdl,dn->bdln', shifted_delta, A) # torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
-            DeltaB_u = torch.einsum('bdl,bnl,bdl->bdln', shifted_delta, Bu, u)
+            DeltaB_u = torch.einsum('bdl,bnl,bdl->bdln', shifted_delta, Bu, u) 
+            # DeltaB_u = torch.einsum('bdl,bnl,bdl->bdln', shifted_delta, Bu, stub) # TODO Use for debugging purposes
 
-            h = torch.zeros(batch_size, self.d_model,  self.N, device=self.device)
+            h = torch.zeros(batch_size, self.d_model, self.N, device=self.device)
             y = torch.zeros(u.size(), device=self.device) # B, H, L
             for l in range(L):
                 first_term = deltaA[:, :, l, :] * h # equivalent to torch.einsum('bdn,bdn->bnd', deltaA[:, :, l, :], h) 
                 h = first_term + DeltaB_u[:, :, l, :]
                 y[:, :, l] = torch.einsum('bn,bdn->bd', Cu[:, :, l], h)
 
-            out = y + u * rearrange(self.D, "d -> d 1")
+            out = y + u * rearrange(self.D, "d -> d 1") # out.size() is (B, d_model, L)
+            out = rearrange(out, "B D L -> B L D")
+            out = self.norm(out)
+            out = rearrange(out, "B L D -> B D L")
+
+            # print(f"y.size is {y.size()}; torch.mean(y, dim=(1, 2),  keepdim=True)).size is {torch.mean(y, dim=(1, 2),  keepdim=True).size()}")
+            # layer_norm = nn.LayerNorm([y.size(1), y.size(2)] , elementwise_affine=False)
+            # out = layer_norm(y)
+            # print(f"\t self.d_model = {self.d_model} \t\t torch.var(y) = {torch.sqrt(torch.var(y, dim=(1, 2), unbiased=False)[0])}")
+            # out = y #(y - torch.mean(y, dim=(1, 2), keepdim=True)) / torch.sqrt(torch.var(y, dim=(1, 2), keepdim=True, unbiased=False)) # TODO For debugging purposes
             return out
         else:
             raise NotImplementedError
@@ -515,7 +553,20 @@ def AdamSSM(params, impl=Adam, hyperparam_mode='mup_fullalign', decoupled_wd=Fal
             for width_mult, group in skip_p.items():
                 group['lr'] /= width_mult # Entry-wise
             for width_mult, group in downproj_p.items():
-                group['lr'] *= 1.0 #/= width_mult**.5 # Readout
+                group['lr'] /= width_mult**.5 # Readout
+        elif hyperparam_mode == 'umup_fullalign': # TODO will need to change so actually follow u-map
+            for width_mult, group in upproj_p.items():
+                group['lr'] /= width_mult**.5 # Embedding
+            for width_mult, group in BC_ssm_p.items():
+                group['lr'] /= width_mult**.5 # Readout
+            for width_mult, group in delta_p.items():
+                group['lr'] /= width_mult  # Hidden
+            for width_mult, group in delta_bias_p.items():
+                group['lr'] = 0.0 #*= 1.0 # TODO learning rate for delta bias set to 0
+            for width_mult, group in skip_p.items():
+                group['lr'] /= width_mult # Entry-wise
+            for width_mult, group in downproj_p.items():
+                group['lr'] /= width_mult**.5 # Readout
         elif hyperparam_mode == 'mup_noalign':
             for width_mult, group in upproj_p.items():
                 group['lr'] /= width_mult**.5 # Embedding
