@@ -141,15 +141,15 @@ class MixerModelEmbedding(nn.Module):
         # NOTE: we initialize embed_w to be of shape (fan_in, fan_out), whereas
         # we initialize decode_w in MixerModelDecoder to be of shape (fan_out, fan_in).
         # The reason is to accommodate what F.embedding expects
-        if 'mup' in hyperparam_mode:
+        if 'umap' in hyperparam_mode:
+            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
+        elif 'mup' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out) * (width_mult**(-.5)))
         elif 'sp' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
         elif 'ntk' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
         elif 'mf' in hyperparam_mode:
-            self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
-        elif 'umap' in hyperparam_mode:
             self.embed_w = nn.Parameter(torch.randn(fan_in, fan_out))
         else:
             raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
@@ -162,17 +162,27 @@ class MixerModelEmbedding(nn.Module):
 
         output should have the form (batch_size, embedding_dim, sequence_length)
         """
-        # x_onehot = F.one_hot(x, num_classes=self.vocab_size) # size (seq_length, batch_size, vocab_size)
-        embeded = F.embedding(x, self.embed_w) # size (seq_length, batch_size, embedding_dim)
-        embeded = einops.rearrange(embeded, 'l b e -> b e l')
+        # TODO: Stud to effectively decrease token size:
+        # breakpoint()
+        with torch.no_grad():
+            MAX_TOKEN_SIZE = 20
+            self.embed_w[MAX_TOKEN_SIZE:, :] = 0.
+        
+        x_onehot = F.one_hot(x, num_classes=self.vocab_size).to(self.embed_w.dtype) # size (seq_length, batch_size, vocab_size)
+        embeded = torch.einsum('lbv,vd->bdl', x_onehot, self.embed_w)
 
-        if 'mup' in self.hyperparam_mode:
+
+        # embeded = F.embedding(x, self.embed_w) # size (seq_length, batch_size, embedding_dim)
+        # embeded = einops.rearrange(embeded, 'l b e -> b e l')
+        # breakpoint()
+
+        if 'umap' in self.hyperparam_mode:
+            return embeded
+        elif 'mup' in self.hyperparam_mode:
             return embeded*(self.width_mult**(.5))
         elif 'sp' in self.hyperparam_mode:
             return embeded
         elif 'ntk' in self.hyperparam_mode:
-            return embeded
-        elif 'mf' in self.hyperparam_mode:
             return embeded
         elif 'mf' in self.hyperparam_mode:
             return embeded
@@ -186,15 +196,16 @@ class MixerModelDecoder(nn.Module):
         self.width_mult = width_mult
         self.hyperparam_mode = hyperparam_mode
         self.fan_in = fan_in # Used for u-mup
-        if 'mup' in hyperparam_mode:
-            self.decode_w = nn.Parameter(torch.randn(fan_out, fan_in)) #*(width_mult**(-.5))) #TODO: Consider temporary comment out the multiplier.
+        if 'umup' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
+        elif 'mup' in hyperparam_mode:
+            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))# *(width_mult**(-.5))) #TODO comment out for now
+            # self.decode_w = nn.Parameter((torch.rand(fan_out, fan_in)*2) - 1)
         elif 'sp' in hyperparam_mode:
             self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)*(width_mult**(-.5))))
         elif 'ntk' in hyperparam_mode:
             self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
         elif 'mf' in hyperparam_mode:
-            self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
-        elif 'umup' in hyperparam_mode:
             self.decode_w = nn.Parameter((torch.randn(fan_out, fan_in)))
         else:
             raise ValueError(f'hyperparam_mode = {hyperparam_mode} not recognized.')
@@ -204,16 +215,16 @@ class MixerModelDecoder(nn.Module):
         output has shape (sequence_length, batch_size, vocab_size)
         """
         x_t = einops.rearrange(x, "b h l -> b l h")
-        if 'mup' in self.hyperparam_mode:
-            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-.5))
+        if 'umup' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.fan_in**(-1.0))
+        elif 'mup' in self.hyperparam_mode:
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-.5))/ 2**1.5 # TODO Added the division by constant arbitrarily
         elif 'sp' in self.hyperparam_mode:
-            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)
+            return torch.einsum('vh,blh->lbv', self.decode_w, x_t) / 2**1.5 # TODO Added the division by constant arbitrarily
         elif 'ntk' in self.hyperparam_mode:
             return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-.5))
         elif 'mf' in self.hyperparam_mode:
             return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.width_mult**(-1.0))
-        elif 'umup' in self.hyperparam_mode:
-            return torch.einsum('vh,blh->lbv', self.decode_w, x_t)*(self.fan_in**(-1.0))
         else:
             raise ValueError
 
@@ -306,28 +317,30 @@ class MixerModelWithSimpleHead(nn.Module):
         }
 
     def forward(self, input_ids, inference_params=None, **mixer_kwargs):
+        # breakpoint()
         hidden_states = self.embedding(input_ids)
+        # breakpoint()
         residual = None
-        for layer in self.layers:
+        for li, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states, None, inference_params=inference_params, **mixer_kwargs # Note: can change residual to None to get rid of residuals
             )
-        if (not hasattr(self, 'fused_add_norm')) or (not self.fused_add_norm):
-            residual = (hidden_states + residual) if residual is not None else hidden_states
-            hidden_states = residual # NOTE: Got rid of norm_f here
-        else:
-            raise ValueError
-            # Set prenorm=False here since we don't need the residual
-            hidden_states = layer_norm_fn(
-                hidden_states,
-                self.norm_f.weight,
-                self.norm_f.bias,
-                eps=self.norm_f.eps,
-                residual=residual,
-                prenorm=False,
-                residual_in_fp32=self.residual_in_fp32,
-                is_rms_norm=isinstance(self.norm_f, RMSNorm)
-            )
+        # if (not hasattr(self, 'fused_add_norm')) or (not self.fused_add_norm):
+        #     residual = (hidden_states + residual) if residual is not None else hidden_states
+        #     hidden_states = residual # NOTE: Got rid of norm_f here
+        # else:
+        #     raise ValueError
+        #     # Set prenorm=False here since we don't need the residual
+        #     hidden_states = layer_norm_fn(
+        #         hidden_states,
+        #         self.norm_f.weight,
+        #         self.norm_f.bias,
+        #         eps=self.norm_f.eps,
+        #         residual=residual,
+        #         prenorm=False,
+        #         residual_in_fp32=self.residual_in_fp32,
+        #         is_rms_norm=isinstance(self.norm_f, RMSNorm)
+        #     )
         # breakpoint()
         output = self.decoder(hidden_states)
         return output

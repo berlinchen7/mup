@@ -92,7 +92,7 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
     
     train_data = batchify(corpus.train, batch_size, device=args.device)
 
-    breakpoint()
+    # breakpoint()
 
     df = get_coord_data(models, batchloader(train_data, args.bptt), mup=mup, lr=lr, optimizer=optimizer, flatten_output=True, nseeds=nseeds, nsteps=nsteps, lossfn='nll')
     # print(optimizer)
@@ -109,7 +109,7 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
 if __name__ == '__main__':
 
     import os
-    os.chdir('/n/fs/scratch/bc2188/mup/examples/Transformer') # NOTE Added by BC on Aug 14, 2024
+    os.chdir('/home/berlin/mup/examples/Transformer') # NOTE Added by BC on Aug 14, 2024
 
     parser = argparse.ArgumentParser(description=
     '''

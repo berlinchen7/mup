@@ -2,6 +2,7 @@
 import argparse
 import os
 import time
+from zoneinfo import ZoneInfo
 from datetime import datetime
 
 import numpy as np
@@ -12,7 +13,8 @@ import torch.optim as optim
 try:
     from apex import amp
 except:
-    print('Failed to import apex. You can still train with --precision {float|double}.')
+    pass
+    # print('Failed to import apex. You can still train with --precision {float|double}.')
 
 from mup.coord_check import get_coord_data, plot_coord_data
 from mup import MuAdam, MuSGD, get_shapes, make_base_shapes, set_base_shapes
@@ -21,7 +23,7 @@ import examples.SSMs.data as data
 from examples.SSMs.mixer_seq_simple import MixerModelWithSimpleHead
 from examples.SSMs.ssm import set_base_shapes_custom
 
-torch.set_default_device('cuda')
+# torch.set_default_device('cuda:2')
 
 ###############################################################################
 # Training code
@@ -81,7 +83,7 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
                         n_layer = n_layer,
                         vocab_size = ntokens,
                         d_intermediate = 0,
-                        ssm_cfg=None,
+                        ssm_cfg={'norm': args.coord_check_norm},
                         device=None,
                         dtype=None,
                         
@@ -93,7 +95,7 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
                         n_layer = n_layer,
                         vocab_size = ntokens,
                         d_intermediate = 0,
-                        ssm_cfg=None,
+                        ssm_cfg={'norm': args.coord_check_norm},
                         device=None,
                         dtype=None,
                         
@@ -113,7 +115,7 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
         return f
 
     optimizer = optimizer.replace('mu', '')
-    widths = 2**np.arange(7, 13) # 14) #2**np.arange(7, 14 if optimizer=='sgd' else 12)
+    widths = 2**np.arange(7, 14) # 14) #2**np.arange(7, 14 if optimizer=='sgd' else 12)
     models = {w: gen(w, standparam=not mup) for w in widths}
 
     
@@ -122,13 +124,12 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
     df = get_coord_data(models, batchloader(train_data, args.bptt), mup=mup, lr=lr, optimizer=optimizer, 
                         flatten_output=True, nseeds=nseeds, nsteps=nsteps, lossfn='nll', cuda=True,
                         hyperparam_mode=args.hyperparam_mode)
-    # print(optimizer)
     # if mup and optimizer=='adam':
     #     df.to_pickle("/home/berlin/mup/examples/Transformer/coord_checks/μp_trsfmr_adam_coord.pkl")  
 
     prm = args.hyperparam_mode #'μP' if mup else 'SP'
     
-    timestamp = datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
+    timestamp = datetime.now(ZoneInfo("America/New_York")).strftime('%m_%d_%Y_%H_%M_%S')
     exp_name = f'coordcheck_ssmmixer_{args.hyperparam_mode}_{timestamp}'
     # df.to_pickle(f"{plotdir}/{exp_name}.pkl")  
     df.to_csv(f"{plotdir}/{exp_name}.csv") 
@@ -136,13 +137,13 @@ def coord_check(mup, lr, optimizer, batch_size, nsteps, nseeds, data_dir, args, 
     return plot_coord_data(df, legend=legend,
         save_to=os.path.join(plotdir, f'{exp_name}.png'),
         suptitle=f'{prm} SSM {optimizer} lr={lr} nseeds={nseeds}',
-        face_color='xkcd:light grey' if not mup else None)
+        face_color='xkcd:light grey' if not mup else None,)
 
 
 if __name__ == '__main__':
 
     import os
-    os.chdir('/n/fs/scratch/bc2188/mup/examples/SSMs') # NOTE Added by BC on Aug 14, 2024
+    os.chdir('/home/berlin/mup/examples/SSMs') # NOTE Added by BC on Aug 14, 2024
 
     parser = argparse.ArgumentParser(description=
     '''
@@ -232,11 +233,16 @@ if __name__ == '__main__':
     parser.add_argument('--deferred_init', action='store_true', help='Skip instantiating the base and delta models for mup. Requires torchdistx.')
     parser.add_argument('--hyperparam_mode', type=str, help='hyperparam_mode.')
     parser.add_argument('--d_model_base', type=int, help='d_model of the base model.')
+    parser.add_argument('--no_warning', action='store_true', default=False)
+    parser.add_argument('--coord_check_norm', type=str, default=None)
+
 
 
     args = parser.parse_args()
 
-    print(args)
+    if args.no_warning:
+        import warnings;   warnings.filterwarnings("ignore")
+
 
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)
@@ -246,8 +252,8 @@ if __name__ == '__main__':
 
     device = args.device = torch.device("cuda" if args.cuda else "cpu")
 
-    # torch.set_default_device('cuda:0')
-    # print(device, torch.get_default_device())
+    torch.set_default_device('cuda:0')
+    print(device, torch.get_default_device())
 
     ###############################################################################
     # Load data
@@ -352,8 +358,8 @@ if __name__ == '__main__':
         import os
         os.makedirs('coord_checks', exist_ok=True)
         plotdir = 'coord_checks'
-        torch.set_default_device('cuda:0')
-        coord_check(mup=True, lr=args.lr, optimizer=args.optimizer, batch_size=args.batch_size, nsteps=args.coord_check_nsteps, nseeds=args.coord_check_nseeds, data_dir=args.data, args=args, plotdir=plotdir, legend=False)
+        # torch.set_default_device('cuda:0')
+        coord_check(mup=True, lr=args.lr, optimizer=args.optimizer, batch_size=args.batch_size, nsteps=args.coord_check_nsteps, nseeds=args.coord_check_nseeds, data_dir=args.data, args=args, plotdir=plotdir, legend=True)
         # coord_check(mup=False, lr=args.lr, optimizer=args.optimizer, batch_size=args.batch_size, nsteps=args.coord_check_nsteps, nseeds=args.coord_check_nseeds, data_dir=args.data, args=args, plotdir=plotdir, legend=False)
         import sys; sys.exit()
 

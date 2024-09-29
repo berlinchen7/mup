@@ -307,8 +307,10 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
         from tqdm import tqdm
         pbar = tqdm(total=nseeds * len(models))
 
+
+    GRAD_PLOT_DIR = '/home/berlin/mup/examples/SSMs/grad_plot'
+    os.makedirs(GRAD_PLOT_DIR, exist_ok=True)
     for i in seeds_iter:
-        # print(f"seed is set to {i}")
         torch.manual_seed(i)
         for width, model in models.items():
             # if width == 1700:
@@ -321,6 +323,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
 
             optimizer = optcls(model)
             for batch_idx, batch in enumerate(dataloader, 1):
+                # print(f"batch_idx is {batch_idx}")
                 remove_hooks = []
                 # add hooks
                 for name, module in model.named_modules():
@@ -345,6 +348,7 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                     if flatten_input:
                         data = data.view(data.size(0), -1)
                     # breakpoint()
+
                     output = model(data)
                     if flatten_output:
                         output = output.view(-1, output.shape[-1])
@@ -365,6 +369,23 @@ def _get_coord_data(models, dataloader, optcls, nsteps=3,
                         raise NotImplementedError(f'unknown `lossfn`: {lossfn}')
                 optimizer.zero_grad()
                 loss.backward()
+
+                # if i == 0:
+                #     file_name = f'inproj_t={batch_idx}_w={width}_seed={i}.pt'
+                #     grad = model.layers[0].mixer.in_proj.weight.grad
+                #     torch.save(grad, os.path.join(GRAD_PLOT_DIR, file_name))
+                # breakpoint()
+
+                # if i == 0 and batch_idx == 1:
+                #     breakpoint()
+
+                # model.layers[0].mixer.in_proj.weight.grad[...] = torch.sign(model.layers[0].mixer.in_proj.weight.grad[...])#1.
+                # assert 0. not in model.layers[0].mixer.in_proj.weight.grad[...]
+                
+                # model.layers[0].mixer.B.weight.grad[...] = 0.
+                # assert 0. not in model.layers[0].mixer.B.weight.grad[...] 
+
+                # breakpoint()
                 # if batch_idx == 1:
                 #     print(f"DEBUG: \t d_model = {model.h} \t\t l1 = {FDICT['l1'](model.up_project.up_project.grad)*(model.h**2.0)}") # Temporary debug print (Aug 8, 2024)
                 optimizer.step()
@@ -497,34 +518,39 @@ def get_coord_data(models, dataloader, optimizer='sgd', lr=None, mup=True,
         return params
     from examples.SSMs.ssm import SSM, SelectiveSSMKernel, NonSelectiveSSMKernel, AdamSSM, MuSGD as SGDSSM
     from examples.SSMs.mixer_seq_simple import MixerModelWithSimpleHead
-    if optimizer == 'sgd':
-        def optcls(model):
-            if isinstance(model, SSM):
-                model_names = []
-                for n, _ in model.named_parameters():
-                    model_names.append(n)
-                if isinstance(model.kernel, SelectiveSSMKernel):
-                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024//(8**2),)
-                elif isinstance(model.kernel, NonSelectiveSSMKernel):
-                    return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024//(8**2),)
-                else:
-                    raise ValueError
-            else:
-                return SGD(get_trainable(model), lr=lr)
+    def optcls(model):
+        model_names = []
+        for n, _ in model.named_parameters():
+            model_names.append(n)
+        return AdamSSM(get_trainable(model), hyperparam_mode=hyperparam_mode, model_names=model_names, lr=lr,)
+    # if optimizer == 'sgd':
+    #     def optcls(model):
+    #         if isinstance(model, SSM):
+    #             model_names = []
+    #             for n, _ in model.named_parameters():
+    #                 model_names.append(n)
+    #             if isinstance(model.kernel, SelectiveSSMKernel):
+    #                 return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=model.h**(-1.0), model_names=model_names, L=1024//(8**2),)
+    #             elif isinstance(model.kernel, NonSelectiveSSMKernel):
+    #                 return SGDSSM(get_trainable(model), lr=lr, ssm_force_multiply=1, model_names=model_names, L=1024//(8**2),)
+    #             else:
+    #                 raise ValueError
+    #         else:
+    #             return SGD(get_trainable(model), lr=lr)
 
-    elif optimizer == 'adam':
-        def optcls(model):
-            if isinstance(model, SSM) or isinstance(model, MixerModelWithSimpleHead):
-                model_names = []
-                for n, _ in model.named_parameters():
-                    model_names.append(n)
-                return AdamSSM(get_trainable(model), hyperparam_mode=hyperparam_mode, model_names=model_names, lr=lr,)
-            else:
-                return Adam(get_trainable(model), lr=lr)
-    elif optimizer == 'adamw':
-        optcls = lambda model: AdamW(get_trainable(model), lr=lr)
-    elif optimizer is None:
-        raise ValueError('optimizer should be sgd|adam|adamw or a custom function')
+    # elif optimizer == 'adam':
+    #     def optcls(model):
+    #         if isinstance(model, SSM) or isinstance(model, MixerModelWithSimpleHead):
+    #             model_names = []
+    #             for n, _ in model.named_parameters():
+    #                 model_names.append(n)
+    #             return AdamSSM(get_trainable(model), hyperparam_mode=hyperparam_mode, model_names=model_names, lr=lr,)
+    #         else:
+    #             return Adam(get_trainable(model), lr=lr)
+    # elif optimizer == 'adamw':
+    #     optcls = lambda model: AdamW(get_trainable(model), lr=lr)
+    # elif optimizer is None:
+    #     raise ValueError('optimizer should be sgd|adam|adamw or a custom function')
     
     data = _get_coord_data(models, dataloader, optcls, **kwargs)
     data['optimizer'] = optimizer
